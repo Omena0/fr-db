@@ -1,9 +1,10 @@
 from ..errors import DuplicateValueError, TypeMismatchError
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from .column import Column
 from .table import Table
 
 class Row:
+    __slots__ = ['values', 'table', 'value_types', 'columns', 'id']
     def __init__(
             self,
             table: Table | None = None,
@@ -13,7 +14,7 @@ class Row:
         self.values = values
         self.table = table
         self.value_types: dict[str, type[Any]] = {}
-        self.columns = None
+        self.columns: dict[str, Column[Any]] = {}
 
         self.id = id_ or id(self)
 
@@ -30,57 +31,91 @@ class Row:
     def _deferred_init(self):
         assert isinstance(self.table, Table)
 
-        self.columns: list[Column[Any]] | None = self.table._columns # pyright: ignore[reportPrivateUsage]
+        self.columns: dict[str, Column[Any]] = self.table._columns # pyright: ignore[reportPrivateUsage]
 
-        for col in self.columns:
+        if self.id not in self.table._rows: # pyright: ignore[reportPrivateUsage]
+            self.table._rows[self.id] = self # pyright: ignore[reportPrivateUsage]
+
+        for name, col in self.columns.items():
             # Try to initialize missing values to default or autoinc
-            if col.name not in self.values:
+            if name not in self.values:
                 val = self._get_default_value(col)
                 self.values[col.name] = val
 
-    def _check_values(self):
-        assert isinstance(self.table, Table) and self.columns
+    def _check_values(
+        self,
+        rows: Iterable[Row] | None = None,
+        exclude: Iterable[Row] = (),
+    ):
+        assert self.columns
 
-        for col in [c for c in self.columns if c.unique]:
-            value = self.values[col.name]
+        exclude_ids = {row.id for row in exclude}
+        exclude_ids.add(self.id)
 
-            if any(
-                    row is not self and
-                    row.values[col.name] == value
-                    for row in self.table.rows
-                ):
+        if rows is None:
+            assert self.table
+            rows = self.table._rows.values()  # pyright: ignore[reportPrivateUsage]
+
+        for name, col in self.columns.items():
+            if not col.unique:
+                continue
+
+            value = self.values[name]
+
+            index = self.table.get_index(name) if self.table else None
+
+            if index is not None:
+                matching = index.values.get(value, set())
+
+                if any(id not in exclude_ids for id in matching):
+                    raise DuplicateValueError(
+                        f"Duplicate value {value!r} for "
+                        f"{'primary' if col.primary else 'unique'} column {name!r}"
+                    )
+
+            elif any(
+                row.id not in exclude_ids and row.values[name] == value
+                for row in rows
+            ):
                 raise DuplicateValueError(
-                    f"Duplicate value {value!r} for {'primary' if col.primary else 'unique'} column {col.name!r}"
+                    f"Duplicate value {value!r} for "
+                    f"{'primary' if col.primary else 'unique'} column {name!r}"
                 )
 
-        types = {c.name: c.type for c in self.columns}
-        for name, val in self.values.items():
-            if types[name] is not type(val):
-                raise TypeMismatchError(f'Type mismatch in row: {type(val).__name__} != {types[name].__name__}, {name}={val}')
+        value_types = self.value_types or {
+            name: col.type
+            for name, col in self.columns.items()
+        }
 
-        if self not in self.table.rows:
-            self.table.rows.append(self)
+        for name, value in self.values.items():
+            expected = value_types[name]
+
+            if expected is not type(value):
+                raise TypeMismatchError(
+                    f"Type mismatch in row: {type(value).__name__} "
+                    f"!= {expected.__name__}, {name}={value}"
+                )
 
     def _get_default_value(self, col: Column[Any]):
         assert isinstance(self.table, Table)
-        value = None
 
         if 'autoinc' in col.properties:
-            return self.table.rows.index(self)
+            return list(self.table.rows.keys()).index(self.id)
 
-        if col.default:
-            if callable(col.default):
-                return col.default()
-            return col.default
+        elif col.default:
+            return col.default() if callable(col.default) else col.default
 
-        return value
+        return None
 
     def set_value(self, key: str, value: Any):
         self.values[key] = value
         return self
 
-    def transform(self, keys: list[str], func: Callable[[Any], Any]) -> Row:
+    def transform(self, keys: str | list[str], func: Callable[[Any], Any]) -> Row:
         r = Row(None, id_=self.id, **self.values)
+
+        if isinstance(keys, str):
+            keys = [keys]
 
         for k, v in r.values.items():
             if k in keys:
@@ -89,17 +124,20 @@ class Row:
         return r
 
     def copy(self, table: Table | None = None) -> Row:
-        row = Row(table, self.id, **self.values.copy())
+        row = object.__new__(Row)
 
-        if hasattr(self, "columns") and self.columns:
-            row.columns = self.columns.copy()
-
-        if hasattr(self, "value_types"):
-            row.value_types = self.value_types.copy()
+        row.table = table
+        row.id = self.id
+        row.values = self.values.copy()
+        row.columns = table._columns if table else self.columns # pyright: ignore[reportPrivateUsage]
+        row.value_types = self.value_types.copy()
 
         return row
 
     @property
     def primary_key(self):
         assert self.columns
-        return [col.name for col in self.columns if 'primary' in col.properties][0]
+        return [
+            name for name, col in self.columns.items()
+            if 'primary' in col.properties
+        ][0]

@@ -5,6 +5,7 @@ if TYPE_CHECKING:
     from .table import Table
 
 class Column[T]():
+    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table']
     def __init__(
         self,
         name: str,
@@ -29,7 +30,7 @@ class Column[T]():
         self.table = table
 
         if self.table and self not in self.table.columns:
-            self.table.columns.append(self)
+            self.table.columns[self.name] = self
 
     def __repr__(self) -> str:
         return f'Column({self.name}, {self.type.__name__}, {self.default}, {self.properties})'
@@ -46,7 +47,7 @@ class Column[T]():
         column.table = table
 
         if table is not None:
-            table._columns.append(column) # pyright: ignore[reportPrivateUsage]
+            table._columns[self.name] = column # pyright: ignore[reportPrivateUsage]
 
         return column
 

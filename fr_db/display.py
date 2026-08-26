@@ -14,7 +14,7 @@ def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
     YELLOW = "\033[33m"
     DIM = "\033[2m"
 
-    ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+    ANSI_RE: re.Pattern[str] = re.compile(r"\x1b\[[0-9;]*m")
 
     def visible_len(text: str) -> int:
         return len(ANSI_RE.sub("", text))
@@ -84,7 +84,7 @@ def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
 
         return lines or [""]
 
-    indexed_columns = list(enumerate(table.columns))
+    indexed_columns = list(enumerate(table.columns.values()))
     indexed_columns.sort(
         key=lambda item: (
             not item[1].primary,
@@ -134,7 +134,7 @@ def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
 
     raw_values: list[list[str]] = [
         [str(row.values.get(col.name, "")) for col in columns]
-        for row in table.rows
+        for row in table.rows.values()
     ]
 
     natural_widths: list[int] = [
@@ -221,12 +221,15 @@ def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
     rows = table.rows
 
     if primary is not None and sort:
-        rows = sorted(
-            rows,
-            key=lambda row: row.values[primary.name],
-        )
+        rows = {
+            row.id: row
+            for row in sorted(
+                rows.values(),
+                key=lambda row: row.values[primary.name],
+            )
+        }
 
-    for row in rows:
+    for row in rows.values():
         cell_lines = [
             wrap_text(
                 str(row.values.get(col.name, "")),

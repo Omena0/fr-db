@@ -1,5 +1,9 @@
-from fr_db import Database, Table, Row, Column
+from fr_db import Database, Table, Row, Column, Index
 from datetime import datetime
+import cProfile
+import pstats
+
+profiler = cProfile.Profile()
 
 db = Database()
 
@@ -7,20 +11,38 @@ users = Table(
     db,
     "users",
     [
-        Row(username='randomuser'),
-        Row(username='Omena0')
     ],
     [
         Column('id', int, ['primary', 'autoinc']),
         Column('username', str, ['unique']),
         Column('created_at', datetime, default=datetime.now)
+    ],
+    [
+        Index('id', True),
+        Index('username', True)
     ]
 )
 
 with users.transaction() as tx:
-    tx.update(
-        users.where(lambda r: r['id'] == 1)
-            .transform(lambda r: r.transform(['id'], lambda x: x+10))
-    )
+    for i in range(10000):
+        tx.add(Row(username=f'randomuser{i}'))
 
-print(users)
+    tx.add(Row(username='Omena0'))
+
+
+profiler.enable()
+
+ITERS = 1000
+with users.transaction() as tx:
+    for _ in range(ITERS):
+        tx.update(
+            tx.where('username', 'Omena0')
+                .transform(lambda r: r.transform(['id'], lambda x: x+1))
+        )
+
+profiler.disable()
+
+stats = pstats.Stats(profiler)
+stats.sort_stats("cumtime").print_stats(30)
+
+
