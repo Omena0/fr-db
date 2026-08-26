@@ -4,73 +4,135 @@ if TYPE_CHECKING:
     from .table import Table
     from .row import Row
 
+
 class Index:
-    __slots__ = ['column', 'unique', 'values']
+    __slots__ = ['column', 'unique', 'values', '_shared']
+
     def __init__(
         self,
         column: str,
-        unique: bool = False
+        unique: bool = False,
     ):
         self.column = column
         self.unique = unique
         self.values: dict[Any, set[int]] = {}
+        self._shared = False
 
     def __repr__(self) -> str:
         return f'Index({self.column}, {self.values})'
 
+    def _detach(self):
+        if not self._shared:
+            return
+
+        self.values = self.values.copy()
+        self._shared = False
+
+    def _copy_bucket(self, value: Any) -> set[int] | None:
+        ids = self.values.get(value)
+
+        if ids is None:
+            return None
+
+        ids = ids.copy()
+        self.values[value] = ids
+        return ids
+
     def add(self, row: Row):
         value = row.values[self.column]
+        ids = self.values.get(value)
 
-        if self.unique and value in self.values:
+        if self.unique and ids:
             raise ValueError(
-                f"Duplicate value {value!r} for unique index {self.column!r}"
+                f"Duplicate value {value!r} "
+                f"for unique index {self.column!r}"
             )
 
-        self.values.setdefault(value, set()).add(row.id)
+        self._detach()
+
+        if ids is None:
+            self.values[value] = {row.id}
+        else:
+            ids = ids.copy()
+            ids.add(row.id)
+            self.values[value] = ids
 
     def remove(self, row: Row):
         value = row.values[self.column]
-
         ids = self.values.get(value)
-        if ids is None:
+
+        if ids is None or row.id not in ids:
             return
 
-        ids.discard(row.id)
+        self._detach()
 
-        if not ids:
+        ids = ids.copy()
+        ids.remove(row.id)
+
+        if ids:
+            self.values[value] = ids
+        else:
             del self.values[value]
 
-    def update(self, old_value: Any, new_value: Any, row_id: int):
+    def update(
+        self,
+        old_value: Any,
+        new_value: Any,
+        row_id: int,
+    ):
         if old_value == new_value:
             return
 
-        ids = self.values.get(old_value)
-        if ids is not None:
-            ids.discard(row_id)
+        new_ids = self.values.get(new_value)
 
-            if not ids:
-                del self.values[old_value]
-
-        if self.unique and new_value in self.values:
+        if self.unique and new_ids and (
+            new_ids != {row_id}
+        ):
             raise ValueError(
-                f"Duplicate value {new_value!r} for unique index {self.column!r}"
+                f"Duplicate value {new_value!r} "
+                f"for unique index {self.column!r}"
             )
 
-        self.values.setdefault(new_value, set()).add(row_id)
+        self._detach()
+
+        old_ids = self.values.get(old_value)
+
+        if old_ids is not None:
+            old_ids = old_ids.copy()
+            old_ids.discard(row_id)
+
+            if old_ids:
+                self.values[old_value] = old_ids
+            else:
+                del self.values[old_value]
+
+        new_ids = self.values.get(new_value)
+
+        if new_ids is None:
+            self.values[new_value] = {row_id}
+        else:
+            new_ids = new_ids.copy()
+            new_ids.add(row_id)
+            self.values[new_value] = new_ids
 
     def build(self, table: Table):
-        """Build the index from all rows currently in the table."""
         self.values.clear()
+        self._shared = False
 
-        for id, row in table._rows.items():  # pyright: ignore[reportPrivateUsage]
+        for row_id, row in table._rows.items(): # pyright: ignore[reportPrivateUsage]
             value = row.values[self.column]
+            ids = self.values.get(value)
 
-            if self.unique and value in self.values:
+            if self.unique and ids:
                 raise ValueError(
-                    f"Duplicate value {value!r} in unique index {self.column!r}"
+                    f"Duplicate value {value!r} "
+                    f"in unique index {self.column!r}"
                 )
 
-            self.values.setdefault(value, set()).add(id)
+            if ids is None:
+                self.values[value] = {row_id}
+            else:
+                ids.add(row_id)
 
     def copy(self, table: Table):
         index = Index(self.column, self.unique)
@@ -78,4 +140,10 @@ class Index:
             value: ids.copy()
             for value, ids in self.values.items()
         }
+        return index
+
+    def clone(self) -> Index:
+        index = Index(self.column, self.unique)
+        index.values = self.values
+        index._shared = True
         return index

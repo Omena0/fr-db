@@ -5,7 +5,7 @@ if TYPE_CHECKING:
     from .table import Table
 
 class Column[T]():
-    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table']
+    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table', '_next_autoinc']
     def __init__(
         self,
         name: str,
@@ -24,6 +24,8 @@ class Column[T]():
         self.primary = 'primary' in properties
         self.unique  = 'unique'  in properties or self.primary
 
+        self._next_autoinc = 0
+
         if self.unique and self.default is not None:
             raise MutuallyExclusiveError('Column cannot be unique and have a default value.')
 
@@ -34,6 +36,10 @@ class Column[T]():
 
     def __repr__(self) -> str:
         return f'Column({self.name}, {self.type.__name__}, {self.default}, {self.properties})'
+
+    def autoinc(self):
+        self._next_autoinc += 1
+        return self._next_autoinc-1
 
     def copy(self, table: Table | None = None) -> Column[T]:
         column = Column(

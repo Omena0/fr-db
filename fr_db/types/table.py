@@ -1,7 +1,7 @@
 from collections.abc import Iterable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from ..errors import NoTransactionError, TableAlreadyExistsError, InATransactionError
+from ..errors import NoTransactionError, TableAlreadyExistsError, InATransactionError, TypeMismatchError
 from ..display import display_table
 from .operation import Operation
 
@@ -24,7 +24,7 @@ def _to_dict[K,T](
     return {key(item): item for item in value}
 
 class Table:
-    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations']
+    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns']
     def __init__(
             self,
             database: Database | None,
@@ -49,20 +49,24 @@ class Table:
         if not _data_is_valid:
             self._check_data()
 
+        self._default_columns = tuple(
+            col for col in self._columns.values()
+            if 'autoinc' in col.properties or col.default is not None
+        )
+
     def _check_data(self):
-        for row in self.rows.values():
+        for row in self._rows.values():
             if row.table != self:
                 row.table = self
                 row._deferred_init() # pyright: ignore[reportPrivateUsage]
 
-        for row in self.rows.values():
-            row._check_values() # pyright: ignore[reportPrivateUsage]
+        self._validate_data()
 
-        for col in self.columns.values():
+        for col in self._columns.values():
             if col.table != self:
                 col.table = self
 
-        if self.database and self not in self.database.tables:
+        if self.database and self not in self.database.tables.values():
             if self.name in self.database.tables:
                 raise TableAlreadyExistsError(f'Table {self.name} already exists.')
 
@@ -70,6 +74,22 @@ class Table:
 
         for idx in self.indexes.values():
             idx.build(self)
+
+    def _validate_data(self):
+        for row in self._rows.values():
+            value_types = row.value_types or {
+                name: col.type
+                for name, col in row.columns.items()
+            }
+
+            for name, value in row.values.items():
+                expected = value_types[name]
+
+                if expected is not type(value):
+                    raise TypeMismatchError(
+                        f"Type mismatch in row: {type(value).__name__} "
+                        f"!= {expected.__name__}, {name}={value}"
+                    )
 
     def __str__(self) -> str:
         return display_table(self, width=100, sort=False)
@@ -248,76 +268,32 @@ class Table:
 
         return self._transaction
 
-    def add(self, row: Row):
+    def add(self, row: Row) -> Table:
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
             )
 
-        if row.table != self:
-            row.table = self
-            row._deferred_init()  # pyright: ignore[reportPrivateUsage]
+        self.operations.append(Operation("add", row))
+        return self
 
-        row._check_values()  # pyright: ignore[reportPrivateUsage]
-
-        self._rows[row.id] = row
-
-        for index in self.indexes.values():
-            index.add(row)
-
-    def update(self, table: Table):
+    def update(self, table: Table) -> Table:
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
             )
 
-        source_rows = table.rows
+        self.operations.append(Operation("update", table))
+        return self
 
-        for source_id, source in source_rows.items():
-            current = self._rows.get(source_id)
-
-            if current is None:
-                continue
-
-            old_indexed_values = {
-                column: current.values[column]
-                for column in self.indexes
-            }
-
-            current.values.update(source.values)
-
-            current._check_values( # pyright: ignore[reportPrivateUsage]
-                self._rows.values(),
-                exclude=[current],
-            )
-
-            for column, old_value in old_indexed_values.items():
-                new_value = current.values[column]
-
-                if old_value != new_value:
-                    self.indexes[column].update(
-                        old_value,
-                        new_value,
-                        current.id,
-                    )
-
-    def delete(self, key: Callable[[Row], bool]):
+    def delete(self, key: Callable[[Row], bool]) -> Table:
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
             )
 
-        to_delete = {
-            id
-            for id, row in self._rows.items()
-            if key(row)
-        }
-
-        for id in to_delete:
-            row = self._rows.pop(id)
-
-            for index in self.indexes.values():
-                index.remove(row)
+        self.operations.append(Operation("delete", key))
+        return self
 
     # Copying
     def copy(self) -> Table:
@@ -368,7 +344,6 @@ class Table:
         self.operations = table.operations.copy()
 
     def clone(self) -> Table:
-        """Clone the table, but not the values."""
         return Table(
             None,
             self.name,
@@ -383,9 +358,12 @@ class Table:
         self._rows = table._rows.copy()
         self._columns = table._columns.copy()
         self.operations = table.operations.copy()
-
         self.indexes = {
-            name: index.copy(self)
+            name: index.clone()
             for name, index in table.indexes.items()
         }
+        self._default_columns = tuple(
+            col for col in self._columns.values()
+            if 'autoinc' in col.properties or col.default is not None
+        )
 

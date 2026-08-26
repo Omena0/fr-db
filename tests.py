@@ -586,14 +586,9 @@ def test_update_preserves_unselected_columns():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    raise SystemExit(
-        pytest.main(
-            [
-                __file__,
-                "-v",
-                "--tb=short",
-                "-ra",
-            ]
-        )
+    pytest.main(
+        [
+            __file__,
+            '-q'
+        ]
     )
-

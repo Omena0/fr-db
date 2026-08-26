@@ -126,6 +126,68 @@ class Operation:
             for row in unique_rows
         }
 
+    def _add(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+        row = self.key[0]
+        row = row.copy(table)
+        row.table = table
+
+        for col in table._default_columns: # pyright: ignore[reportPrivateUsage]
+            if col.name not in row.values:
+                row.values[col.name] = row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
+
+        new_rows = rows.copy()
+        new_rows[row.id] = row
+
+        for index in table.indexes.values():
+            index.add(row)
+
+        return new_rows
+
+    def _update(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+        source_table = self.key[0]
+        source_rows = source_table.rows
+
+        new_rows = rows.copy()
+
+        for source_id, source in source_rows.items():
+            current = new_rows.get(source_id)
+            if current is None:
+                continue
+
+            current = current.copy(table)
+            new_rows[source_id] = current
+
+            old_values = {
+                column: current.values[column]
+                for column in table.indexes
+                if column in source.values
+            }
+
+            current.values.update(source.values)
+
+            for column, old_value in old_values.items():
+                new_value = current.values[column]
+                if old_value != new_value:
+                    table.indexes[column].update(
+                        old_value,
+                        new_value,
+                        current.id,
+                    )
+
+        return new_rows
+
+    def _delete(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+        key = self.key[0]
+        to_delete = {id for id, row in rows.items() if key(row)}
+
+        new_rows = rows.copy()
+        for id in to_delete:
+            row = new_rows.pop(id)
+            for index in table.indexes.values():
+                index.remove(row)
+
+        return new_rows
+
     def apply(self, table: Table):
         rows = table._rows  # pyright: ignore[reportPrivateUsage]
 
@@ -146,6 +208,15 @@ class Operation:
 
         elif self.type == "distinct":
             rows = self._distinct(rows)
+
+        elif self.type == "add":
+            rows = self._add(table, rows)
+
+        elif self.type == "update":
+            rows = self._update(table, rows)
+
+        elif self.type == "delete":
+            rows = self._delete(table, rows)
 
         else:
             raise ValueError(f"Unknown operation type: {self.type}")

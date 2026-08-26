@@ -31,16 +31,16 @@ class Row:
     def _deferred_init(self):
         assert isinstance(self.table, Table)
 
-        self.columns: dict[str, Column[Any]] = self.table._columns # pyright: ignore[reportPrivateUsage]
+        self.columns = self.table._columns # pyright: ignore[reportPrivateUsage]
 
         if self.id not in self.table._rows: # pyright: ignore[reportPrivateUsage]
             self.table._rows[self.id] = self # pyright: ignore[reportPrivateUsage]
 
-        for name, col in self.columns.items():
-            # Try to initialize missing values to default or autoinc
-            if name not in self.values:
-                val = self._get_default_value(col)
-                self.values[col.name] = val
+        for col in self.columns.values():
+            if col.name in self.values:
+                continue
+
+            self.values[col.name] = self._get_default_value(col)
 
     def _check_values(
         self,
@@ -100,7 +100,7 @@ class Row:
         assert isinstance(self.table, Table)
 
         if 'autoinc' in col.properties:
-            return list(self.table.rows.keys()).index(self.id)
+            return col.autoinc()
 
         elif col.default:
             return col.default() if callable(col.default) else col.default

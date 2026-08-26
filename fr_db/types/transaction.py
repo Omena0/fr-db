@@ -13,7 +13,7 @@ class Transaction(Table):
         self._catch_exc = catch_exc
 
     def __enter__(self) -> Self:
-        self.rcopy(self._table)
+        self.rclone(self._table)
         self._active = True
         self._aborted = False
 
@@ -26,8 +26,11 @@ class Transaction(Table):
         if _exc_type:
             self.abort()
 
+        else:
+            self._table._validate_data()
+
         if not self._aborted:
-            self._table.rcopy(self)
+            self._table.rclone(self)
 
         self._active = False
         self._table._transaction = None
