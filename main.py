@@ -31,7 +31,6 @@ with users.transaction() as tx:
     tx.add(Row(username='Omena0'))
 
 
-
 ITERS = 10000
 with users.transaction() as tx:
     for _ in range(ITERS):

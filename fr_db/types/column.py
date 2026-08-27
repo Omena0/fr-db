@@ -5,7 +5,8 @@ if TYPE_CHECKING:
     from .table import Table
 
 class Column[T]():
-    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table', '_next_autoinc']
+    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table', '_next_autoinc', 'default_is_factory']
+
     def __init__(
         self,
         name: str,
@@ -20,6 +21,7 @@ class Column[T]():
         self.name = name
         self.type = val_type
         self.default: T | Callable[[], Any] = default
+        self.default_is_factory = callable(self.default)
         self.properties: list[str] = properties
         self.primary = 'primary' in properties
         self.unique  = 'unique'  in properties or self.primary

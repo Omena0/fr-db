@@ -6,6 +6,109 @@ if TYPE_CHECKING:
     from .table import Table
     from .row import Row
 
+
+class _RowView:
+    """Dict-like view overlaying a delta on top of a base dict.
+
+    Avoids copying the entire rows dict when only a few rows change.
+    Reads check _delta first, then fall back to _base.
+    """
+    __slots__ = ('_base', '_delta', '_deleted', '_len')
+
+    def __init__(self, base: dict[int, Row], delta: dict[int, Row] | None = None, deleted: set[int] | None = None):
+        self._base = base
+        self._delta = delta if delta is not None else {}
+        self._deleted: set[int] = deleted if deleted is not None else set()
+
+        # Track length incrementally to avoid O(n) computation
+        self._len = len(base) + len(self._delta) - len(self._deleted)
+
+    def __getitem__(self, key: int) -> Row:
+        if key in self._deleted:
+            raise KeyError(key)
+
+        return self._delta[key] if key in self._delta else self._base[key]
+
+    def __setitem__(self, key: int, value: Row) -> None:
+        in_base = key in self._base
+        in_deleted = key in self._deleted
+
+        self._delta[key] = value
+        self._deleted.discard(key)
+
+        # Length changes only when adding a new key or restoring a deleted one
+        if in_deleted or not in_base:
+            self._len += 1
+
+    def __delitem__(self, key: int) -> None:
+        in_delta = key in self._delta
+        in_base = key in self._base
+
+        if in_delta:
+            del self._delta[key]
+        self._deleted.add(key)
+
+        # Length changes when removing a visible key
+        if in_delta or in_base:
+            self._len -= 1
+
+    def __contains__(self, key: int) -> bool:
+        if key in self._deleted:
+            return False
+        return key in self._delta or key in self._base
+
+    def __len__(self) -> int:
+        return self._len
+
+    def __iter__(self):
+        seen: set[int] = set()
+        for key in self._base:
+            if key not in self._deleted and key not in self._delta:
+                seen.add(key)
+                yield key
+        for key in self._delta:
+            if key not in seen:
+                yield key
+
+    def get(self, key: int, default: Row | None = None) -> Row | None:
+        if key in self._deleted:
+            return default
+
+        return self._delta[key] if key in self._delta else self._base.get(key, default)
+
+    def items(self):
+        for key in self:
+            yield key, self[key]
+
+    def values(self):
+        for key in self:
+            yield self[key]
+
+    def keys(self):
+        result = set(self._base.keys()) - self._deleted
+        result |= set(self._delta.keys())
+        return result
+
+    def copy(self) -> dict[int, Row]:
+        return dict(self.items())
+
+    def pop(self, key: int, *args: Any) -> Row:
+        if key in self._delta:
+            value = self._delta.pop(key)
+            self._deleted.discard(key)
+            return value
+
+        if key in self._deleted:
+            if args:
+                return args[0]
+            raise KeyError(key)
+        if key in self._base:
+            self._deleted.add(key)
+            return self._base[key]
+        if args:
+            return args[0]
+        raise KeyError(key)
+
 def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any):
     for key in keys:
         value = key(value)
@@ -213,8 +316,9 @@ class Operation:
             for row in unique_rows
         }
 
-    def _add(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
-        new_rows = rows.copy()
+    def _add(self, table: Table, rows: dict[int, Row]) -> _RowView:
+        view = rows if isinstance(rows, _RowView) else _RowView(rows)
+
         for row in self.key:
             row = row.copy(table)
             row.table = table
@@ -223,26 +327,26 @@ class Operation:
                 if col.name not in row.values:
                     row.values[col.name] = row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
 
-            new_rows[row.id] = row
+            view[row.id] = row
 
             for index in table.indexes.values():
                 index.add(row)
 
-        return new_rows
+        return view
 
-    def _update(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _update(self, table: Table, rows: dict[int, Row]) -> _RowView:
         source_table: Table = self.key[0]
         source_rows = source_table.rows
 
-        new_rows = rows.copy()
+        view = rows if isinstance(rows, _RowView) else _RowView(rows)
 
         for source_id, source in source_rows.items():
-            current = new_rows.get(source_id)
+            current = view.get(source_id)
             if current is None:
                 continue
 
             current = current.copy(table)
-            new_rows[source_id] = current
+            view[source_id] = current
 
             old_values = {
                 column: current.values[column]
@@ -261,11 +365,19 @@ class Operation:
                         current.id,
                     )
 
-        return new_rows
+        return view
 
     def _delete(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
         key = self.key[0]
         to_delete = {id for id, row in rows.items() if key(row)}
+
+        if isinstance(rows, _RowView):
+            view = rows
+            for id in to_delete:
+                row = view.pop(id)
+                for index in table.indexes.values():
+                    index.remove(row)
+            return view
 
         new_rows = rows.copy()
         for id in to_delete:
@@ -275,7 +387,7 @@ class Operation:
 
         return new_rows
 
-    map: dict[str, Callable[[Self, Table, dict[int, Row]], dict[int, Row]]] = {
+    map: dict[str, Callable[[Self, Table, dict[int, Row]], dict[int, Row] | _RowView]] = {
         "where": _where,
         "transform": _transform,
         "transform_rows": _transform_rows,
@@ -296,7 +408,7 @@ class Operation:
         if not func:
             raise InvalidOperationType(f"Unknown operation type: {self.type}")
 
-        rows = func(self, table, rows)
+        new_rows = func(self, table, rows)
 
-        table._rows = rows  # pyright: ignore[reportPrivateUsage]
+        table._rows = new_rows  # type: ignore
 

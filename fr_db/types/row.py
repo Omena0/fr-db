@@ -56,6 +56,7 @@ class Row:
             assert self.table
             rows = self.table._rows.values()  # pyright: ignore[reportPrivateUsage]
 
+        # Check uniqueness
         for name, col in self.columns.items():
             if not col.unique:
                 continue
@@ -64,19 +65,16 @@ class Row:
 
             index = self.table.get_index(name) if self.table else None
 
-            if index is not None:
-                matching = index.values.get(value, set())
-
-                if any(id not in exclude_ids for id in matching):
-                    raise DuplicateValueError(
-                        f"Duplicate value {value!r} for "
-                        f"{'primary' if col.primary else 'unique'} column {name!r}"
-                    )
+            if index is not None and index.values.get(value):
+                raise DuplicateValueError(
+                    f"Duplicate value {value!r} for "
+                    f"{'primary' if col.primary else 'unique'} column {name!r}"
+                )
 
             elif any(
-                row.id not in exclude_ids and row.values[name] == value
-                for row in rows
-            ):
+                    row.id not in exclude_ids and row.values[name] == value
+                    for row in rows
+                ):
                 raise DuplicateValueError(
                     f"Duplicate value {value!r} for "
                     f"{'primary' if col.primary else 'unique'} column {name!r}"
@@ -103,7 +101,7 @@ class Row:
             return col.autoinc()
 
         elif col.default:
-            return col.default() if callable(col.default) else col.default
+            return col.default() if col.default_is_factory else col.default
 
         return None
 
