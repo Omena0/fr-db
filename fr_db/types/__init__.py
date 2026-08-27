@@ -3,7 +3,7 @@ from .table import Table
 from .row import Row
 from .column import Column
 from .index import Index
-from .operation import Operation
+from .operation import Operation, OpType
 from .transaction import Transaction
 
 __all__ = [
@@ -13,5 +13,6 @@ __all__ = [
     'Column',
     'Index',
     'Operation',
+    'OpType',
     'Transaction'
 ]

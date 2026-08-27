@@ -4,7 +4,7 @@ from .column import Column
 from .table import Table
 
 class Row:
-    __slots__ = ['values', 'table', 'value_types', 'columns', 'id']
+    __slots__ = ['values', 'table', 'columns', 'id']
     def __init__(
             self,
             table: Table | None = None,
@@ -13,7 +13,6 @@ class Row:
         ):
         self.values = values
         self.table = table
-        self.value_types: dict[str, type[Any]] = {}
         self.columns: dict[str, Column[Any]] = {}
 
         self.id = id_ or id(self)
@@ -80,7 +79,7 @@ class Row:
                     f"{'primary' if col.primary else 'unique'} column {name!r}"
                 )
 
-        value_types = self.value_types or {
+        value_types = {
             name: col.type
             for name, col in self.columns.items()
         }
@@ -128,7 +127,6 @@ class Row:
         row.id = self.id
         row.values = self.values.copy()
         row.columns = table._columns if table else self.columns # pyright: ignore[reportPrivateUsage]
-        row.value_types = self.value_types.copy()
 
         return row
 

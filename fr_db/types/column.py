@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Callable, Any
 if TYPE_CHECKING:
     from .table import Table
 
+_MISSING = object()
+
 class Column[T]():
     __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table', '_next_autoinc', 'default_is_factory']
 
@@ -12,10 +14,10 @@ class Column[T]():
         name: str,
         val_type: type[T],
         properties: list[str] = [],
-        default: T | Callable[[], Any] = None,
+        default: T | Callable[[], Any] = _MISSING,
         table: Table | None = None,
     ) -> None:
-        if default and not isinstance(default, val_type) and not callable(default):
+        if default is not _MISSING and not isinstance(default, val_type) and not callable(default):
             raise TypeMismatchError(f'Default must be type of val_type: {default}')
 
         self.name = name
@@ -28,7 +30,7 @@ class Column[T]():
 
         self._next_autoinc = 0
 
-        if self.unique and self.default is not None:
+        if self.unique and self.default is not _MISSING:
             raise MutuallyExclusiveError('Column cannot be unique and have a default value.')
 
         self.table = table

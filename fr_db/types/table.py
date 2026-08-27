@@ -1,9 +1,9 @@
 from collections.abc import Iterable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from ..errors import NoTransactionError, TableAlreadyExistsError, InATransactionError, TypeMismatchError
+from .operation import Operation, OpType
 from ..display import display_table
-from .operation import Operation
 
 if TYPE_CHECKING:
     from .transaction import Transaction
@@ -77,7 +77,7 @@ class Table:
 
     def _validate_data(self):
         for row in self._rows.values():
-            value_types = row.value_types or {
+            value_types = {
                 name: col.type
                 for name, col in row.columns.items()
             }
@@ -194,37 +194,41 @@ class Table:
         return any(row.values[column] == value for row in self._rows.values())
 
     # Querying
+    @overload
+    def where(self, column: Callable[[Row], bool]) -> Table: ...
+    @overload
+    def where(self, column: str, key: Any) -> Table: ...
     def where(self, column: str | Callable[[Row], bool], key: Any = _MISSING) -> Table:
         t = self.clone()
 
         if key is _MISSING:
             assert callable(column)
-            op = Operation("where", column)
+            op = Operation(OpType.WHERE, column)
         else:
             assert isinstance(column, str)
-            op = Operation("where", column, key)
+            op = Operation(OpType.WHERE, column, key)
 
         t.operations.append(op)
         return t
 
     def transform(self, *keys: Callable[[Row], Row]) -> Table:
         t = self.clone()
-        t.operations.append(Operation("transform", *keys))
+        t.operations.append(Operation(OpType.TRANSFORM, *keys))
         return t
 
     def transform_rows(self, keys: str | list[str], func: Callable[[Any], Any]) -> Table:
         t = self.clone()
-        t.operations.append(Operation("transform_rows", keys, func))
+        t.operations.append(Operation(OpType.TRANSFORM_ROWS, keys, func))
         return t
 
     def select(self, *columns: str) -> Table:
         t = self.clone()
-        t.operations.append(Operation("select", *columns))
+        t.operations.append(Operation(OpType.SELECT, *columns))
         return t
 
     def limit(self, count: int) -> Table:
         t = self.clone()
-        t.operations.append(Operation("limit", count))
+        t.operations.append(Operation(OpType.LIMIT, count))
         return t
 
     def sort(
@@ -233,12 +237,12 @@ class Table:
         reverse: bool = False,
     ) -> Table:
         t = self.clone()
-        t.operations.append(Operation("sort", key, reverse))
+        t.operations.append(Operation(OpType.SORT, key, reverse))
         return t
 
     def distinct(self, *columns: str) -> Table:
         t = self.clone()
-        t.operations.append(Operation("distinct", *columns))
+        t.operations.append(Operation(OpType.DISTINCT, *columns))
         return t
 
     # Mutation
@@ -255,7 +259,7 @@ class Table:
                 'You must be in a transaction to mutate a table.'
             )
 
-        self.operations.append(Operation("add", row))
+        self.operations.append(Operation(OpType.ADD, row))
         return self
 
     def update(self, table: Table) -> Table:
@@ -264,7 +268,7 @@ class Table:
                 'You must be in a transaction to mutate a table.'
             )
 
-        self.operations.append(Operation("update", table))
+        self.operations.append(Operation(OpType.UPDATE, table))
         return self
 
     def delete(self, key: Callable[[Row], bool]) -> Table:
@@ -273,7 +277,7 @@ class Table:
                 'You must be in a transaction to mutate a table.'
             )
 
-        self.operations.append(Operation("delete", key))
+        self.operations.append(Operation(OpType.DELETE, key))
         return self
 
     # Copying
@@ -329,7 +333,7 @@ class Table:
         t = object.__new__(Table)
         t.database = None
         t.name = self.name
-        t._rows = self._rows
+        t._rows = self._rows.copy()
         t._columns = self._columns
         t.indexes = self.indexes
         t._transaction = None

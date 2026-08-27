@@ -8,6 +8,7 @@ __all__ = [
     'Column',
     'Index',
     'Operation',
+    'OpType',
     'Transaction',
     'display_table'
 ]

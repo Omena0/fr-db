@@ -42,6 +42,6 @@ with users.transaction() as tx:
 profiler.disable()
 
 stats = pstats.Stats(profiler)
-stats.sort_stats("cumtime").print_stats(30)
+stats.sort_stats("cumtime").print_stats()
 
 

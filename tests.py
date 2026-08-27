@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 
-from fr_db import Database, Table, Row, Column
+from fr_db import Database, Table, Row, Column, Operation, OpType
 
 
 def make_users() -> Table:
@@ -579,6 +579,118 @@ def test_update_preserves_unselected_columns():
     assert row["username"] == "Z"
     assert row["id"] == 0
     assert row["created_at"] == before
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+def test_empty_table_operations():
+    table = Table(
+        None,
+        "empty",
+        [],
+        [
+            Column("id", int, ["primary", "autoinc"]),
+            Column("name", str),
+        ],
+    )
+
+    assert len(table.rows) == 0
+    assert len(table.where(lambda r: r["id"] > 0).rows) == 0
+    assert len(table.limit(5).rows) == 0
+    assert len(table.sort(lambda r: r["id"]).rows) == 0
+
+
+def test_clone_independence():
+    table = make_users()
+
+    cloned = table.clone()
+
+    assert cloned is not table
+    assert cloned._rows is not table._rows
+
+    # Row objects are shared between original and clone
+    original_row = row_by_id(table, 0)
+    cloned_row = row_by_id(cloned, 0)
+    assert original_row is cloned_row
+
+    # Mutating the shared Row affects both
+    cloned_row.values["username"] = "MUTATED"
+    assert row_by_id(table, 0)["username"] == "MUTATED"
+
+
+def test_query_pushdown_limit_before_sort():
+    ops = Operation.optimize([
+        Operation(OpType.LIMIT, 3),
+        Operation(OpType.SORT, lambda r: r["id"], False),
+    ])
+
+    assert ops[0].type == OpType.SORT
+    assert ops[1].type == OpType.LIMIT
+
+
+def test_update_with_select_then_transform_preserves_unselected():
+    table = make_users()
+
+    with table.transaction() as tx:
+        tx.update(
+            tx.where(lambda r: r["id"] == 0)
+            .select("username")
+            .transform(
+                lambda r: r.transform("username", lambda _: "Z")
+            )
+        )
+
+    row = row_by_id(table, 0)
+    assert row["username"] == "Z"
+    assert row["id"] == 0
+    assert "created_at" in row.values
+
+
+def test_multiple_tables_auto_increment():
+    table1 = Table(
+        None,
+        "t1",
+        columns=[Column("id", int, ["primary", "autoinc"])],
+    )
+    table2 = Table(
+        None,
+        "t2",
+        columns=[Column("id", int, ["primary", "autoinc"])],
+    )
+
+    with table1.transaction() as tx1:
+        tx1.add(Row())
+        tx1.add(Row())
+
+    with table2.transaction() as tx2:
+        tx2.add(Row())
+        tx2.add(Row())
+
+    assert [r["id"] for r in table1.rows.values()] == [0, 1]
+    assert [r["id"] for r in table2.rows.values()] == [0, 1]
+
+
+def test_transaction_empty_operations():
+    table = make_users()
+
+    with table.transaction() as tx:
+        pass
+
+    assert len(table.rows) == 11
+
+
+def test_distinct_on_empty_table():
+    table = Table(
+        None,
+        "empty",
+        [],
+        [Column("name", str)],
+    )
+
+    result = table.distinct("name")
+    assert len(result.rows) == 0
 
 
 # ---------------------------------------------------------------------------
