@@ -1,4 +1,5 @@
-from typing import Any, TYPE_CHECKING, Callable, Iterable, cast
+from typing import Any, TYPE_CHECKING, Callable, Iterable, cast, Self
+from ..errors import InvalidOperationType
 
 
 if TYPE_CHECKING:
@@ -10,6 +11,8 @@ def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any):
         value = key(value)
     return value
 
+_MERGEABLE = frozenset({'add', 'delete', 'where', 'transform', 'transform_rows'})
+
 class Operation:
     __slots__ = ['type', 'key']
     def __init__(self, type: str, *key: Any):
@@ -18,6 +21,75 @@ class Operation:
 
     def __repr__(self) -> str:
         return f'Operation({self.type}, *{self.key})'
+
+    @classmethod
+    def optimize(cls, ops: list[Operation]) -> list[Operation]:
+        if len(ops) <= 1:
+            return ops
+
+        result: list[Operation] = []
+        i = 0
+        n = len(ops)
+
+        while i < n:
+            op = ops[i]
+
+            if op.type not in _MERGEABLE:
+                result.append(op)
+                i += 1
+                continue
+
+            # Collect all consecutive mergeable operations of the same type
+            group = [op]
+            j = i + 1
+            while j < n and ops[j].type == op.type and (op.type != 'where' or (len(ops[j].key) == 1)):
+                group.append(ops[j])
+                j += 1
+
+            if len(group) == 1:
+                result.append(op)
+            else:
+                result.append(cls._merge_group(group))
+
+            i = j
+
+        return result
+
+    @classmethod
+    def _merge_group(cls, group: list[Operation]) -> Operation:
+        op_type = group[0].type
+
+        if op_type == 'add':
+            rows:list[Row] = []
+            for op in group:
+                rows.extend(op.key)
+
+            return Operation('add', *rows)
+
+        elif op_type == 'delete':
+            funcs = [op.key[0] for op in group]
+            return Operation('delete', lambda r: any(f(r) for f in funcs)) # type: ignore
+
+        elif op_type == 'where':
+            funcs = [op.key[0] for op in group]
+            return Operation('where', lambda r: all(f(r) for f in funcs)) # type: ignore
+
+        elif op_type == 'transform':
+            funcs: list[Callable[..., Any]] = []
+            for op in group:
+                funcs.extend(op.key)
+
+            return Operation('transform', *funcs)
+
+        elif op_type == 'transform_rows':
+            transforms: list[Any] = []
+
+            for op in group:
+                transforms.append(op.key)
+
+            return Operation('transform_rows', transforms)
+
+        raise ValueError(f"Cannot merge {op_type}")
 
     def _where(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
         if len(self.key) == 1:
@@ -53,9 +125,24 @@ class Operation:
             if id in rows
         }
 
-    def _transform(self, rows: dict[int, Row]):
+    def _transform(self, table: Table, rows: dict[int, Row]):
         for id, row in rows.items():
             rows[id] = apply_all(self.key, row)
+
+        return rows
+
+    def _transform_rows(self, table: Table, rows: dict[int, Row]):
+        transforms = self.key
+        if len(transforms) == 2 and not isinstance(transforms[0], tuple):
+            transforms = [transforms]
+
+        for keys, func in transforms:
+            if isinstance(keys, str):
+                keys = [keys]
+
+            for row in rows.values():
+                for k in keys:
+                    row.values[k] = func(row.values[k])
 
         return rows
 
@@ -83,7 +170,7 @@ class Operation:
             for id, row in rows.items()
         }
 
-    def _limit(self, rows: dict[int, Row]) -> dict[int, Row]:
+    def _limit(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
         assert isinstance(self.key[0], int)
 
         return {
@@ -91,7 +178,7 @@ class Operation:
             for row in list(rows.values())[:self.key[0]]
         }
 
-    def _sort(self, rows: dict[int, Row]) -> dict[int, Row]:
+    def _sort(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
         assert callable(self.key[0])
         assert isinstance(self.key[1], bool)
 
@@ -106,7 +193,7 @@ class Operation:
             )
         }
 
-    def _distinct(self, rows: dict[int, Row]) -> dict[int, Row]:
+    def _distinct(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
         seen: set[tuple[Any, ...]] = set()
         unique_rows: list[Row] = []
 
@@ -127,24 +214,24 @@ class Operation:
         }
 
     def _add(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
-        row = self.key[0]
-        row = row.copy(table)
-        row.table = table
-
-        for col in table._default_columns: # pyright: ignore[reportPrivateUsage]
-            if col.name not in row.values:
-                row.values[col.name] = row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
-
         new_rows = rows.copy()
-        new_rows[row.id] = row
+        for row in self.key:
+            row = row.copy(table)
+            row.table = table
 
-        for index in table.indexes.values():
-            index.add(row)
+            for col in table._default_columns: # pyright: ignore[reportPrivateUsage]
+                if col.name not in row.values:
+                    row.values[col.name] = row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
+
+            new_rows[row.id] = row
+
+            for index in table.indexes.values():
+                index.add(row)
 
         return new_rows
 
     def _update(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
-        source_table = self.key[0]
+        source_table: Table = self.key[0]
         source_rows = source_table.rows
 
         new_rows = rows.copy()
@@ -188,38 +275,28 @@ class Operation:
 
         return new_rows
 
+    map: dict[str, Callable[[Self, Table, dict[int, Row]], dict[int, Row]]] = {
+        "where": _where,
+        "transform": _transform,
+        "transform_rows": _transform_rows,
+        "select": _select,
+        "limit": _limit,
+        "sort": _sort,
+        "distinct": _distinct,
+        "add": _add,
+        "update": _update,
+        "delete": _delete
+    }
+
     def apply(self, table: Table):
         rows = table._rows  # pyright: ignore[reportPrivateUsage]
 
-        if self.type == "where":
-            rows = self._where(table, rows)
+        func = Operation.map.get(self.type)
 
-        elif self.type == "transform":
-            rows = self._transform(rows)
+        if not func:
+            raise InvalidOperationType(f"Unknown operation type: {self.type}")
 
-        elif self.type == "select":
-            rows = self._select(table, rows)
-
-        elif self.type == "limit":
-            rows = self._limit(rows)
-
-        elif self.type == "sort":
-            rows = self._sort(rows)
-
-        elif self.type == "distinct":
-            rows = self._distinct(rows)
-
-        elif self.type == "add":
-            rows = self._add(table, rows)
-
-        elif self.type == "update":
-            rows = self._update(table, rows)
-
-        elif self.type == "delete":
-            rows = self._delete(table, rows)
-
-        else:
-            raise ValueError(f"Unknown operation type: {self.type}")
+        rows = func(self, table, rows)
 
         table._rows = rows  # pyright: ignore[reportPrivateUsage]
 

@@ -101,10 +101,12 @@ class Table:
         if not self.operations:
             return
 
-        for op in self.operations:
-            op.apply(self)
+        optimized: list[Operation] = Operation.optimize(self.operations)
 
-        self.operations.clear()
+        self.operations = []
+
+        for op in optimized:
+            op.apply(self)
 
     @property
     def rows(self) -> dict[int, Row]:
@@ -191,32 +193,6 @@ class Table:
 
         return any(row.values[column] == value for row in self._rows.values())
 
-    # Sync indexes
-    def _sync_indexes(
-        self,
-        old_rows: dict[int, Row],
-        new_rows: dict[int, Row],
-    ):
-        for column, index in self.indexes.items():
-            old_ids = old_rows.keys()
-            new_ids = new_rows.keys()
-
-            # Rows that disappeared.
-            for id in old_ids - new_ids:
-                index.remove(old_rows[id])
-
-            # Rows that were added.
-            for id in new_ids - old_ids:
-                index.add(new_rows[id])
-
-            # Rows that still exist but may have changed indexed values.
-            for id in old_ids & new_ids:
-                old_value = old_rows[id].values[column]
-                new_value = new_rows[id].values[column]
-
-                if old_value != new_value:
-                    index.update(old_value, new_value, id)
-
     # Querying
     def where(self, column: str | Callable[[Row], bool], key: Any = _MISSING) -> Table:
         t = self.clone()
@@ -234,6 +210,11 @@ class Table:
     def transform(self, *keys: Callable[[Row], Row]) -> Table:
         t = self.clone()
         t.operations.append(Operation("transform", *keys))
+        return t
+
+    def transform_rows(self, keys: str | list[str], func: Callable[[Any], Any]) -> Table:
+        t = self.clone()
+        t.operations.append(Operation("transform_rows", keys, func))
         return t
 
     def select(self, *columns: str) -> Table:
@@ -344,15 +325,17 @@ class Table:
         self.operations = table.operations.copy()
 
     def clone(self) -> Table:
-        return Table(
-            None,
-            self.name,
-            self._rows,
-            self._columns,
-            indexes=self.indexes,
-            operations=self.operations.copy(),
-            _data_is_valid=True,
-        )
+        self._apply_ops()
+        t = object.__new__(Table)
+        t.database = None
+        t.name = self.name
+        t._rows = self._rows
+        t._columns = self._columns
+        t.indexes = self.indexes
+        t._transaction = None
+        t.operations = []
+        t._default_columns = self._default_columns
+        return t
 
     def rclone(self, table: Table):
         self._rows = table._rows.copy()

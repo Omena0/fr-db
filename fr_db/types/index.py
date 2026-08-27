@@ -28,16 +28,6 @@ class Index:
         self.values = self.values.copy()
         self._shared = False
 
-    def _copy_bucket(self, value: Any) -> set[int] | None:
-        ids = self.values.get(value)
-
-        if ids is None:
-            return None
-
-        ids = ids.copy()
-        self.values[value] = ids
-        return ids
-
     def add(self, row: Row):
         value = row.values[self.column]
         ids = self.values.get(value)

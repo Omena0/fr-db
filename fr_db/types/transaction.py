@@ -4,18 +4,20 @@ from typing import Self
 
 
 class Transaction(Table):
+    __slots__ = ['_table', '_active', 'aborted', '_catch_exc']
+
     def __init__(self, table: Table, catch_exc: bool = False):
         super().__init__(None, "Transaction")
 
         self._table    = table
         self._active  = False
-        self._aborted = False
+        self.aborted = False
         self._catch_exc = catch_exc
 
     def __enter__(self) -> Self:
         self.rclone(self._table)
         self._active = True
-        self._aborted = False
+        self.aborted = False
 
         return self
 
@@ -26,11 +28,20 @@ class Transaction(Table):
         if _exc_type:
             self.abort()
 
-        else:
-            self._table._validate_data()
+        # Only apply ops on success
+        # If validation fails, abort.
+        if not self.aborted:
+            try:
+                self._apply_ops()
+                self._table._validate_data()
 
-        if not self._aborted:
-            self._table.rclone(self)
+            except Exception as e:
+                self.aborted = True
+                if not self._catch_exc:
+                    raise e
+
+            else:
+                self._table.rclone(self)
 
         self._active = False
         self._table._transaction = None
@@ -38,4 +49,16 @@ class Transaction(Table):
         return self._catch_exc
 
     def abort(self):
-        self._aborted = True
+        self.aborted = True
+
+    def clone(self) -> Table:
+        t = object.__new__(Table)
+        t.database = None
+        t.name = self.name
+        t._rows = self._rows
+        t._columns = self._columns
+        t.indexes = self.indexes
+        t._transaction = None
+        t.operations = []
+        t._default_columns = self._default_columns
+        return t

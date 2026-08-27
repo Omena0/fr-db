@@ -32,13 +32,13 @@ with users.transaction() as tx:
 
 
 
-#ITERS = 1000
-#with users.transaction() as tx:
-#    for _ in range(ITERS):
-#        tx.update(
-#            tx.where('username', 'Omena0')
-#                .transform(lambda r: r.transform(['id'], lambda x: x+1))
-#        )
+ITERS = 10000
+with users.transaction() as tx:
+    for _ in range(ITERS):
+        tx.update(
+            tx.where('username', 'Omena0')
+                .transform_rows(['id'], lambda x: x+1)
+        )
 
 profiler.disable()
 
