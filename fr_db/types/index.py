@@ -21,13 +21,6 @@ class Index:
     def __repr__(self) -> str:
         return f'Index({self.column}, {self.values})'
 
-    def _detach(self):
-        if not self._shared:
-            return
-
-        self.values = self.values.copy()
-        self._shared = False
-
     def add(self, row: Row):
         value = row.values[self.column]
         ids = self.values.get(value)
@@ -37,8 +30,6 @@ class Index:
                 f"Duplicate value {value!r} "
                 f"for unique index {self.column!r}"
             )
-
-        self._detach()
 
         if ids is None:
             self.values[value] = {row.id}
@@ -53,8 +44,6 @@ class Index:
 
         if ids is None or row.id not in ids:
             return
-
-        self._detach()
 
         ids = ids.copy()
         ids.remove(row.id)
@@ -82,8 +71,6 @@ class Index:
                 f"Duplicate value {new_value!r} "
                 f"for unique index {self.column!r}"
             )
-
-        self._detach()
 
         old_ids = self.values.get(old_value)
 

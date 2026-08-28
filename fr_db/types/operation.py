@@ -1,5 +1,6 @@
 from enum import IntEnum, auto
-from typing import Any, TYPE_CHECKING, Callable, Generator, Iterable, cast, Self
+from typing import Any, TYPE_CHECKING, Callable, Iterable, cast, Self
+from .rowview import RowView
 
 from ..errors import InvalidOperationType
 
@@ -32,113 +33,8 @@ class OpType(IntEnum):
 
 _MERGEABLE = frozenset({
     OpType.ADD, OpType.DELETE, OpType.WHERE,
-    OpType.TRANSFORM, OpType.TRANSFORM_ROWS,
+    OpType.TRANSFORM, OpType.TRANSFORM_ROWS, OpType.UPDATE,
 })
-
-class _RowView:
-    """Dict-like view overlaying a delta on top of a base dict.
-
-    Avoids copying the entire rows dict when only a few rows change.
-    Reads check _delta first, then fall back to _base.
-    """
-    __slots__ = ('_base', '_delta', '_deleted', '_len')
-
-    def __init__(self, base: dict[int, Row], delta: dict[int, Row] | None = None, deleted: set[int] | None = None):
-        self._base = base
-        self._delta = delta if delta is not None else {}
-        self._deleted: set[int] = deleted if deleted is not None else set()
-
-        # Track length incrementally to avoid O(n) computation
-        self._len = len(base) + len(self._delta) - len(self._deleted)
-
-    def __getitem__(self, key: int) -> Row:
-        if key in self._deleted:
-            raise KeyError(key)
-
-        return self._delta[key] if key in self._delta else self._base[key]
-
-    def __setitem__(self, key: int, value: Row) -> None:
-        in_base = key in self._base
-        in_deleted = key in self._deleted
-
-        self._delta[key] = value
-        self._deleted.discard(key)
-
-        # Length changes only when adding a new key or restoring a deleted one
-        if in_deleted or not in_base:
-            self._len += 1
-
-    def __delitem__(self, key: int) -> None:
-        in_delta = key in self._delta
-        in_base = key in self._base
-
-        if in_delta:
-            del self._delta[key]
-        self._deleted.add(key)
-
-        # Length changes when removing a visible key
-        if in_delta or in_base:
-            self._len -= 1
-
-    def __contains__(self, key: int) -> bool:
-        if key in self._deleted:
-            return False
-        return key in self._delta or key in self._base
-
-    def __len__(self) -> int:
-        return self._len
-
-    def __iter__(self):
-        seen: set[int] = set()
-        for key in self._base:
-            if key not in self._deleted and key not in self._delta:
-                seen.add(key)
-                yield key
-        for key in self._delta:
-            if key not in seen:
-                yield key
-
-    def get(self, key: int, default: Row | None = None) -> Row | None:
-        if key in self._deleted:
-            return default
-
-        return self._delta[key] if key in self._delta else self._base.get(key, default)
-
-    def items(self) -> Generator[tuple[int, Row], Any, None]:
-        for key in self:
-            yield key, self[key]
-
-    def values(self):
-        for key in self:
-            yield self[key]
-
-    def keys(self):
-        result = set(self._base.keys()) - self._deleted
-        result |= set(self._delta.keys())
-        return result
-
-    def copy(self) -> dict[int, Row]:
-        return dict(self.items())
-
-    def pop(self, key: int, *args: Any) -> Row:
-        if key in self._delta:
-            value = self._delta.pop(key)
-            self._deleted.discard(key)
-            return value
-
-        if key in self._deleted:
-            if args:
-                return args[0]
-            raise KeyError(key)
-
-        if key in self._base:
-            self._deleted.add(key)
-            return self._base[key]
-
-        if args:
-            return args[0]
-
-        raise KeyError(key)
 
 def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any):
     for key in keys:
@@ -419,6 +315,33 @@ class Operation:
 
             return Operation(OpType.TRANSFORM_ROWS, transforms)
 
+        elif op_type == OpType.UPDATE:
+            # Eagerly combine all source rows from multiple UPDATEs
+            # d = a + b + c is equivalent to d = a + (b + c)
+            # Later updates overwrite earlier ones for the same row/column
+            from .tableview import TableView
+            from .table import Table
+
+            combined_values: dict[int, dict[str, Any]] = {}
+            base_table: Table | None = None
+
+            for op in group:
+                source_table: Table = op.key[0]
+                if base_table is None:
+                    base_table = source_table
+                source_rows = source_table.rows
+
+                for row_id, source_row in source_rows.items():
+                    if row_id not in combined_values:
+                        combined_values[row_id] = {}
+                    combined_values[row_id].update(source_row.values)
+
+            # Use RowView to overlay changes on base table's rows (no new Row objects)
+            base_rows = base_table._rows if base_table else {}  # pyright: ignore[reportPrivateUsage]
+            merged_rows = RowView(base_rows, combined_values)
+            merged_table = TableView(base_table, merged_rows) if base_table else TableView(Table(None, "empty"), merged_rows)
+            return Operation(OpType.UPDATE, merged_table)
+
         raise ValueError(f"Cannot merge {op_type}")
 
     # Normal ops
@@ -544,8 +467,8 @@ class Operation:
             for row in unique_rows
         }
 
-    def _add(self, table: Table, rows: dict[int, Row]) -> _RowView:
-        view = rows if isinstance(rows, _RowView) else _RowView(rows)
+    def _add(self, table: Table, rows: dict[int, Row]) -> RowView:
+        view = rows if isinstance(rows, RowView) else RowView(rows)
 
         for row in self.key:
             row = row.copy(table)
@@ -562,27 +485,34 @@ class Operation:
 
         return view
 
-    def _update(self, table: Table, rows: dict[int, Row]) -> _RowView:
+    def _update(self, table: Table, rows: dict[int, Row]) -> RowView:
         source_table: Table = self.key[0]
         source_rows = source_table.rows
 
-        view = rows if isinstance(rows, _RowView) else _RowView(rows)
+        if not source_rows:
+            return rows if type(rows) is RowView else RowView(rows)
+
+        view = rows if type(rows) is RowView else RowView(rows)
+        indexed_columns = set(table.indexes.keys())
 
         for source_id, source in source_rows.items():
             current = view.get(source_id)
             if current is None:
                 continue
 
+            if all(current.values.get(k) == v for k, v in source.values.items()):
+                continue
+
             current = current.copy(table)
             view[source_id] = current
 
-            old_values = {
-                column: current.values[column]
-                for column in table.indexes
-            }
+            # Only track old values for indexed columns that are being updated
+            updated_indexed = indexed_columns & source.values.keys()
+            old_values = {col: current.values[col] for col in updated_indexed}
 
             current.values.update(source.values)
 
+            # Only update indexes for columns that actually changed
             for column, old_value in old_values.items():
                 new_value = current.values[column]
                 if old_value != new_value:
@@ -598,7 +528,7 @@ class Operation:
         key = self.key[0]
         to_delete = {id for id, row in rows.items() if key(row)}
 
-        if isinstance(rows, _RowView):
+        if isinstance(rows, RowView):
             view = rows
             for id in to_delete:
                 row = view.pop(id)
@@ -931,7 +861,7 @@ class Operation:
             for _row in [apply_transforms(rows[id])]
         }
 
-    map: dict[OpType, Callable[[Self, Table, dict[int, Row]], dict[int, Row] | _RowView]] = {
+    map: dict[OpType, Callable[[Self, Table, dict[int, Row]], dict[int, Row] | RowView]] = {
         OpType.WHERE: _where,
         OpType.TRANSFORM: _transform,
         OpType.TRANSFORM_ROWS: _transform_rows,
@@ -961,6 +891,10 @@ class Operation:
             raise InvalidOperationType(f"Unknown operation type: {self.type}")
 
         new_rows = func(self, table, rows)
+
+        # Collapse RowView to actual dict for storage
+        if isinstance(new_rows, RowView):
+            new_rows = new_rows.collapse()
 
         table._rows = new_rows  # type: ignore
 

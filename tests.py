@@ -58,8 +58,8 @@ def test_table_creation():
     for row in rows:
         assert row.table is table
         assert isinstance(row["id"], int)
-        assert isinstance(row["username"], str)
-        assert isinstance(row["created_at"], datetime)
+        assert type(row["username"]) is str
+        assert type(row["created_at"]) is datetime
 
 
 def test_autoincrement():
@@ -74,7 +74,7 @@ def test_default_factory():
     timestamps = [row["created_at"] for row in table.rows.values()]
 
     assert len(timestamps) == 11
-    assert all(isinstance(value, datetime) for value in timestamps)
+    assert all(type(value) is datetime for value in timestamps)
 
 def test_default_factory_is_called_per_row():
     calls = 0
@@ -608,7 +608,7 @@ def test_clone_independence():
     cloned = table.clone()
 
     assert cloned is not table
-    assert cloned._rows is not table._rows
+    assert cloned._rows is not table._rows # pyright: ignore[reportPrivateUsage]
 
     # Row objects are shared between original and clone
     original_row = row_by_id(table, 0)
@@ -623,7 +623,7 @@ def test_clone_independence():
 def test_query_pushdown_limit_before_sort():
     ops = Operation.optimize([
         Operation(OpType.LIMIT, 3),
-        Operation(OpType.SORT, lambda r: r["id"], False),
+        Operation(OpType.SORT, lambda r: r["id"], False),  # type: ignore
     ])
 
     assert ops[0].type == OpType.SORT
@@ -675,7 +675,7 @@ def test_multiple_tables_auto_increment():
 def test_transaction_empty_operations():
     table = make_users()
 
-    with table.transaction() as tx:
+    with table.transaction() as _tx:
         pass
 
     assert len(table.rows) == 11

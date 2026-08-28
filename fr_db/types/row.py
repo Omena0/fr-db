@@ -111,7 +111,7 @@ class Row:
     def transform(self, keys: str | list[str], func: Callable[[Any], Any]) -> Row:
         r = Row(None, id_=self.id, **self.values)
 
-        if isinstance(keys, str):
+        if type(keys) is str:
             keys = [keys]
 
         for k, v in r.values.items():

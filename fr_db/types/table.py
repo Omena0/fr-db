@@ -1,9 +1,16 @@
-from collections.abc import Iterable, Callable
 from typing import TYPE_CHECKING, Any, cast, overload
+from collections.abc import Iterable, Callable
 
-from ..errors import NoTransactionError, TableAlreadyExistsError, InATransactionError, TypeMismatchError
 from .operation import Operation, OpType
 from ..display import display_table
+
+from ..errors import (
+    NoTransactionError,
+    TableAlreadyExistsError,
+    InATransactionError,
+    TypeMismatchError,
+    InvalidOperationType
+)
 
 if TYPE_CHECKING:
     from .transaction import Transaction
@@ -14,25 +21,28 @@ if TYPE_CHECKING:
 
 _MISSING = object()
 
+
 def _to_dict[K,T](
     value: dict[K, T] | Iterable[T],
     key: Callable[[T], K],
 ) -> dict[K, T]:
-    if isinstance(value, dict):
+    if type(value) is dict:
         return cast(dict[K, T], value)
+
+    value = cast(Iterable[T], value)
 
     return {key(item): item for item in value}
 
 class Table:
-    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns']
+    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns', '_in_transaction']
     def __init__(
             self,
             database: Database | None,
             name: str,
-            rows: dict[int, Row] | Iterable[Row] = {},
-            columns: dict[str, Column[Any]] | Iterable[Column[Any]] = {},
-            indexes: dict[str, Index] | Iterable[Index] = {},
-            operations: list[Operation] = [],
+            rows: dict[int, Row] | Iterable[Row] = (),
+            columns: dict[str, Column[Any]] | Iterable[Column[Any]] = (),
+            indexes: dict[str, Index] | Iterable[Index] = (),
+            operations: Iterable[Operation] = (),
             _data_is_valid: bool = False
         ):
         self.database = database
@@ -43,8 +53,9 @@ class Table:
         self.indexes: dict[str, Index] = _to_dict(indexes, lambda index: index.column)
 
         self._transaction = None
+        self._in_transaction = False
 
-        self.operations: list[Operation] = operations
+        self.operations: list[Operation] = list(operations)
 
         if not _data_is_valid:
             self._check_data()
@@ -108,6 +119,16 @@ class Table:
         for op in optimized:
             op.apply(self)
 
+    def _apply_ops_to_rows(self, rows: dict[int, Row]) -> dict[int, Row]:
+        for op in self.operations:
+            if func := Operation.map.get(op.type):
+                rows = func(op, self, rows)
+
+            else:
+                raise InvalidOperationType(f"Unknown operation type: {op.type}")
+
+        return rows
+
     @property
     def rows(self) -> dict[int, Row]:
         if self._transaction:
@@ -136,10 +157,10 @@ class Table:
         if self.database:
             raise NoTransactionError('You must be in a transaction to mutate a table. Write to transaction.columns.')
 
-        if isinstance(value, list):
+        if type(value) is list:
             value = {col.name: col for col in value}
 
-        self._columns = value
+        self._columns = cast(dict[str, Column[Any]], value)
 
     # Auto-indexed lookups
     def get_index(self, column: str) -> Index | None:
@@ -148,7 +169,7 @@ class Table:
         Used by lookup helpers to determine whether an indexed lookup is
         available for the requested column.
         """
-        return self.indexes.get(column)
+        return self.indexes.get(column, None)
 
     def lookup(self, column: str, value: Any) -> set[int]:
         """Return all row IDs whose column has the given value.
@@ -205,7 +226,7 @@ class Table:
             assert callable(column)
             op = Operation(OpType.WHERE, column)
         else:
-            assert isinstance(column, str)
+            assert type(column) is str
             op = Operation(OpType.WHERE, column, key)
 
         t.operations.append(op)
@@ -329,16 +350,18 @@ class Table:
         self.operations = table.operations.copy()
 
     def clone(self) -> Table:
-        self._apply_ops()
+        if not self._in_transaction:
+            self._apply_ops()
         t = object.__new__(Table)
         t.database = None
         t.name = self.name
-        t._rows = self._rows.copy()
+        t._rows = self._rows if self._in_transaction else self._rows.copy()
         t._columns = self._columns
         t.indexes = self.indexes
         t._transaction = None
-        t.operations = []
+        t.operations = self.operations.copy() if self._in_transaction else []
         t._default_columns = self._default_columns
+        t._in_transaction = self._in_transaction
         return t
 
     def rclone(self, table: Table):

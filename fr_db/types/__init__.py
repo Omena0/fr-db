@@ -5,6 +5,8 @@ from .column import Column
 from .index import Index
 from .operation import Operation, OpType
 from .transaction import Transaction
+from .rowview import RowView
+from .tableview import TableView
 
 __all__ = [
     'Database',
@@ -14,5 +16,7 @@ __all__ = [
     'Index',
     'Operation',
     'OpType',
-    'Transaction'
+    'Transaction',
+    'RowView',
+    'TableView'
 ]

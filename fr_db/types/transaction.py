@@ -4,7 +4,7 @@ from typing import Self
 
 
 class Transaction(Table):
-    __slots__ = ['_table', '_active', 'aborted', '_catch_exc']
+    __slots__ = ['_table', '_active', 'aborted', '_catch_exc', '_in_transaction']
 
     def __init__(self, table: Table, catch_exc: bool = False):
         super().__init__(None, "Transaction")
@@ -15,6 +15,7 @@ class Transaction(Table):
         self._catch_exc = catch_exc
 
     def __enter__(self) -> Self:
+        self._in_transaction = True
         self.rclone(self._table)
         self._active = True
         self.aborted = False
@@ -61,4 +62,5 @@ class Transaction(Table):
         t._transaction = None
         t.operations = []
         t._default_columns = self._default_columns
+        t._in_transaction = self._in_transaction
         return t
