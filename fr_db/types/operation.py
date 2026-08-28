@@ -322,14 +322,20 @@ class Operation:
             from .tableview import TableView
             from .table import Table
 
+            # All source tables share the same ops and base table
+            # Evaluate once and reuse for all (avoids 10k _apply_ops calls)
             combined_values: dict[int, dict[str, Any]] = {}
             base_table: Table | None = None
+            source_rows: dict[int, Row] | None = None
 
             for op in group:
                 source_table: Table = op.key[0]
                 if base_table is None:
                     base_table = source_table
-                source_rows = source_table.rows
+                    # Evaluate once - all source tables have same ops
+                    source_rows = source_table.rows
+
+                assert source_rows is not None
 
                 for row_id, source_row in source_rows.items():
                     if row_id not in combined_values:
