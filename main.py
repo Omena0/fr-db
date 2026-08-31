@@ -12,6 +12,7 @@ users = Table(
     db,
     "users",
     [
+        # Empty rows
     ],
     [
         Column('id', int, ['primary', 'autoinc']),
@@ -24,24 +25,32 @@ users = Table(
     ]
 )
 
+ITERS = 10000
+
+# Add 10k+1 users
 with users.transaction() as tx:
-    for i in range(10000):
+    for i in range(ITERS):
         tx.add(Row(username=f'randomuser{i}'))
 
     tx.add(Row(username='Omena0'))
 
-
-ITERS = 10000
+# Increment 'Omena0's ID 10k times
+# Create source table once and reuse - merge logic only evaluates the first source
 with users.transaction() as tx:
+    source = tx.where('username', 'Omena0').transform_rows(['id'], lambda x: x+1)
     for _ in range(ITERS):
-        tx.update(
-            tx.where('username', 'Omena0')
-                .transform_rows(['id'], lambda x: x+1)
-        )
+        tx.update(source)
 
 profiler.disable()
 
 stats = pstats.Stats(profiler)
-stats.sort_stats("cumtime").print_stats()
+stats.sort_stats("cumtime").print_stats(30)
 
+# Make sure it took effect.
+id = users.lookup_one('username', 'Omena0')
+assert id, "Omena0 not in DB."
+
+row = users.rows[id]
+user_id = row['id']
+assert user_id == ITERS*2, f"Invalid user ID: {user_id}, should be {ITERS*2}."
 

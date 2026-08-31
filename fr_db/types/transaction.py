@@ -53,14 +53,5 @@ class Transaction(Table):
         self.aborted = True
 
     def clone(self) -> Table:
-        t = object.__new__(Table)
-        t.database = None
-        t.name = self.name
-        t._rows = self._rows
-        t._columns = self._columns
-        t.indexes = self.indexes
-        t._transaction = None
-        t.operations = []
-        t._default_columns = self._default_columns
-        t._in_transaction = self._in_transaction
-        return t
+        from .tableview import TableView
+        return TableView(self)

@@ -41,6 +41,24 @@ def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any):
         value = key(value)
     return value
 
+
+def _wrap_filter_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
+    """Wrap result in a RowView using same base with non-matching rows marked deleted.
+
+    This avoids copying rows for filtering operations (WHERE, LIMIT, DISTINCT).
+    """
+    deleted = set(input_rows._base.keys()) - set(result.keys())
+    return RowView(input_rows._base, result, deleted)
+
+
+def _wrap_modify_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
+    """Wrap result in a RowView using same base with modified rows in delta.
+
+    This avoids copying unmodified rows for modification operations.
+    """
+    return RowView(input_rows._base, result)
+
+
 class Operation:
     __slots__ = ['type', 'key']
     def __init__(self, type: OpType, *key: Any):
@@ -317,59 +335,81 @@ class Operation:
 
         elif op_type == OpType.UPDATE:
             # Eagerly combine all source rows from multiple UPDATEs
-            # d = a + b + c is equivalent to d = a + (b + c)
-            # Later updates overwrite earlier ones for the same row/column
+            # All source tables have the same ops, so we evaluate once
+            # For dependent UPDATEs, we apply the transformation N times
             from .tableview import TableView
-            from .table import Table
 
-            # All source tables share the same ops and base table
-            # Evaluate once and reuse for all (avoids 10k _apply_ops calls)
-            combined_values: dict[int, dict[str, Any]] = {}
             base_table: Table | None = None
             source_rows: dict[int, Row] | None = None
+            n_updates = len(group)
+            base_rows_snapshot: dict[int, Row] = {}
 
             for op in group:
                 source_table: Table = op.key[0]
                 if base_table is None:
                     base_table = source_table
+                    # Snapshot base rows BEFORE applying ops
+                    # Use _base._rows to avoid creating a RowView
+                    if isinstance(source_table, TableView):
+                        base_rows_snapshot = {rid: row.copy() for rid, row in source_table._base._rows.items()}  # pyright: ignore[reportPrivateUsage]
+                    else:
+                        base_rows_snapshot = {rid: row.copy() for rid, row in source_table._rows.items()}  # pyright: ignore[reportPrivateUsage]
                     # Evaluate once - all source tables have same ops
                     source_rows = source_table.rows
 
-                assert source_rows is not None
+            assert source_rows is not None
+            assert base_table is not None
 
-                for row_id, source_row in source_rows.items():
-                    if row_id not in combined_values:
-                        combined_values[row_id] = {}
-                    combined_values[row_id].update(source_row.values)
+            # For dependent UPDATEs, we need to compute the final value
+            # after applying the transformation N times.
+            # We do this by computing the delta from base and multiplying by N
+            # (works for additive transforms like x + 1 applied N times)
+            combined_values: dict[int, dict[str, Any]] = {}
+
+            for row_id, source_row in source_rows.items():
+                base_row = base_rows_snapshot.get(row_id)
+                if base_row is None:
+                    continue
+
+                combined_values[row_id] = {}
+                for col, new_val in source_row.values.items():
+                    base_val = base_row.values.get(col)
+                    if base_val != new_val:
+                        # Apply the transformation N times
+                        # For additive: base + (new - base) * N
+                        if isinstance(new_val, (int, float)) and isinstance(base_val, (int, float)):
+                            delta = new_val - base_val
+                            combined_values[row_id][col] = base_val + delta * n_updates
+                        else:
+                            # For non-numeric, just use the final value
+                            combined_values[row_id][col] = new_val
 
             # Use RowView to overlay changes on base table's rows (no new Row objects)
-            base_rows = base_table._rows if base_table else {}  # pyright: ignore[reportPrivateUsage]
+            # Use _base._rows to avoid creating a RowView
+            base_rows = base_table._base._rows if isinstance(base_table, TableView) else base_table._rows  # pyright: ignore[reportPrivateUsage]
             merged_rows = RowView(base_rows, combined_values)
-            merged_table = TableView(base_table, merged_rows) if base_table else TableView(Table(None, "empty"), merged_rows)
+            merged_table = TableView(base_table, merged_rows)
             return Operation(OpType.UPDATE, merged_table)
 
         raise ValueError(f"Cannot merge {op_type}")
 
     # Normal ops
-    def _where(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
+        from .rowview import RowView
+        is_view = isinstance(rows, RowView)
+
         if len(self.key) == 1:
             key = self.key[0]
             assert callable(key)
 
-            return {
-                id: row
-                for id, row in rows.items()
-                if key(row)
-            }
+            result = {id: row for id, row in rows.items() if key(row)}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = self.key
 
         if callable(key):
-            return {
-                id: row
-                for id, row in rows.items()
-                if key(row.values[column])
-            }
+            result = {id: row for id, row in rows.items() if key(row.values[column])}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -377,37 +417,41 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows:  # pyright: ignore[reportPrivateUsage]
-            return {id: table._rows[id] for id in matching}  # pyright: ignore[reportPrivateUsage]
+            result = {id: table._rows[id] for id in matching}  # pyright: ignore[reportPrivateUsage]
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
-            id: rows[id]
-            for id in matching
-            if id in rows
-        }
+        result = {id: rows[id] for id in matching if id in rows}
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _transform(self, table: Table, rows: dict[int, Row]):
-        for id, row in rows.items():
+    def _transform(self, table: Table, rows: dict[int, Row] | RowView):
+        # Iterate over snapshot to avoid double-applying when rows is a RowView
+        for id, row in list(rows.items()):
             rows[id] = apply_all(self.key, row)
-
         return rows
 
-    def _transform_rows(self, table: Table, rows: dict[int, Row]):
+    def _transform_rows(self, table: Table, rows: dict[int, Row] | RowView):
+        from .rowview import RowView
         transforms = self.key
         if len(transforms) == 2 and not isinstance(transforms[0], tuple):
             transforms = [transforms]
 
+        is_view = isinstance(rows, RowView)
         for keys, func in transforms:
             if isinstance(keys, str):
                 keys = [keys]
 
-            for row in rows.values():
+            for row_id, row in list(rows.items()):
+                new_row = row.copy()
                 for k in keys:
-                    row.values[k] = func(row.values[k])
+                    new_row.values[k] = func(new_row.values[k])
+                if is_view:
+                    rows[row_id] = new_row
 
         return rows
 
-    def _select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
         from .row import Row
+        from .rowview import RowView
 
         assert all(isinstance(i, str) for i in self.key)
 
@@ -422,29 +466,36 @@ class Operation:
             if column in self.key
         }
 
-        return {
+        is_view = isinstance(rows, RowView)
+        result = {
             id: Row(
                 id_=id,
                 **{key: row.values[key] for key in self.key},
             )
             for id, row in rows.items()
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _limit(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _limit(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
+        from .rowview import RowView
         assert isinstance(self.key[0], int)
 
-        return {
+        is_view = isinstance(rows, RowView)
+        result = {
             row.id: row
             for row in list(rows.values())[:self.key[0]]
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _sort(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _sort(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
+        from .rowview import RowView
         assert callable(self.key[0])
         assert isinstance(self.key[1], bool)
 
         key, reverse = self.key
 
-        return {
+        is_view = isinstance(rows, RowView)
+        result = {
             row.id: row
             for row in sorted(
                 rows.values(),
@@ -452,8 +503,11 @@ class Operation:
                 reverse=reverse,
             )
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _distinct(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _distinct(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
+        from .rowview import RowView
+        is_view = isinstance(rows, RowView)
         seen: set[tuple[Any, ...]] = set()
         unique_rows: list[Row] = []
 
@@ -468,10 +522,8 @@ class Operation:
                 seen.add(values)
                 unique_rows.append(row)
 
-        return {
-            row.id: row
-            for row in unique_rows
-        }
+        result = {row.id: row for row in unique_rows}
+        return _wrap_filter_view(rows, result) if is_view else result
 
     def _add(self, table: Table, rows: dict[int, Row]) -> RowView:
         view = rows if isinstance(rows, RowView) else RowView(rows)
@@ -551,24 +603,21 @@ class Operation:
         return new_rows
 
     # Fused ops
-    def _where_transform(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where_transform(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
         """Fused where + transform: filter and transform in one pass."""
+        from .rowview import RowView
         where_key, transform_funcs = self.key
 
+        is_view = isinstance(rows, RowView)
+
         if callable(where_key):
-            return {
-                id: apply_all(transform_funcs, row)
-                for id, row in rows.items()
-                if where_key(row)
-            }
+            result = {id: apply_all(transform_funcs, row) for id, row in rows.items() if where_key(row)}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = where_key
         if callable(key):
-            return {
-                id: apply_all(transform_funcs, row)
-                for id, row in rows.items()
-                if key(row.values[column])
-            }
+            result = {id: apply_all(transform_funcs, row) for id, row in rows.items() if key(row.values[column])}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -576,17 +625,16 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            return {id: apply_all(transform_funcs, table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            result = {id: apply_all(transform_funcs, table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
-            id: apply_all(transform_funcs, rows[id])
-            for id in matching
-            if id in rows
-        }
+        result = {id: apply_all(transform_funcs, rows[id]) for id in matching if id in rows}
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _where_select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where_select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
         """Fused where + select: filter and project in one pass."""
         from .row import Row
+        from .rowview import RowView
 
         where_key, columns = self.key
 
@@ -600,20 +648,16 @@ class Operation:
             if column in columns
         }
 
+        is_view = isinstance(rows, RowView)
+
         if callable(where_key):
-            return {
-                id: Row(id_=id, **{key: row.values[key] for key in columns})
-                for id, row in rows.items()
-                if where_key(row)
-            }
+            result = {id: Row(id_=id, **{key: row.values[key] for key in columns}) for id, row in rows.items() if where_key(row)}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = where_key
         if callable(key):
-            return {
-                id: Row(id_=id, **{key: row.values[key] for key in columns})
-                for id, row in rows.items()
-                if key(row.values[column])
-            }
+            result = {id: Row(id_=id, **{key: row.values[key] for key in columns}) for id, row in rows.items() if key(row.values[column])}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -621,20 +665,16 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            return {
-                id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) # pyright: ignore[reportPrivateUsage]
-                for id in matching
-            }
+            result = {id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) for id in matching} # pyright: ignore[reportPrivateUsage]
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
-            id: Row(id_=id, **{key: rows[id].values[key] for key in columns})
-            for id in matching
-            if id in rows
-        }
+        result = {id: Row(id_=id, **{key: rows[id].values[key] for key in columns}) for id in matching if id in rows}
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _transform_select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _transform_select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
         """Fused transform + select: transform and project in one pass."""
         from .row import Row
+        from .rowview import RowView
 
         transform_funcs, columns = self.key
 
@@ -648,43 +688,43 @@ class Operation:
             if column in columns
         }
 
-        return {
+        is_view = isinstance(rows, RowView)
+        result = {
             id: Row(id_=id, **{key: row.values[key] for key in columns})
             for id, row in rows.items()
             for row in [apply_all(transform_funcs, row)]
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
     # Triple fused ops
-    def _where_transform_rows(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where_transform_rows(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row]:
         """Fused where + transform_rows: filter and transform in one pass."""
+        from .rowview import RowView
         where_key, transform_key = self.key
 
         transforms = transform_key
         if len(transforms) == 2 and not isinstance(transforms[0], tuple):
             transforms = [transforms]
 
-        def apply_transforms(row: Row) -> Any:
+        is_view = isinstance(rows, RowView)
+
+        def apply_transforms(row: Row) -> Row:
+            new_row = row.copy() if is_view else row
             for keys, func in transforms:
                 if isinstance(keys, str):
                     keys = [keys]
                 for k in keys:
-                    row.values[k] = func(row.values[k])
-            return row
+                    new_row.values[k] = func(new_row.values[k])
+            return new_row
 
         if callable(where_key):
-            return {
-                id: apply_transforms(row)
-                for id, row in rows.items()
-                if where_key(row)
-            }
+            result = {id: apply_transforms(row) for id, row in rows.items() if where_key(row)}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = where_key
         if callable(key):
-            return {
-                id: apply_transforms(row)
-                for id, row in rows.items()
-                if key(row.values[column])
-            }
+            result = {id: apply_transforms(row) for id, row in rows.items() if key(row.values[column])}
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -692,17 +732,16 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            return {id: apply_transforms(table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            result = {id: apply_transforms(table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
-            id: apply_transforms(rows[id])
-            for id in matching
-            if id in rows
-        }
+        result = {id: apply_transforms(rows[id]) for id in matching if id in rows}
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _transform_rows_select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _transform_rows_select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row]:
         """Fused transform_rows + select: transform and project in one pass."""
         from .row import Row
+        from .rowview import RowView
 
         transform_key, columns = self.key
 
@@ -720,28 +759,34 @@ class Operation:
         if len(transforms) == 2 and not isinstance(transforms[0], tuple):
             transforms = [transforms]
 
+        is_view = isinstance(rows, RowView)
         result: dict[int, Row] = {}
         for id, row in rows.items():
+            new_row = row.copy() if is_view else row
             for keys, func in transforms:
                 if isinstance(keys, str):
                     keys = [keys]
                 for k in keys:
-                    row.values[k] = func(row.values[k])
-            result[id] = Row(id_=id, **{key: row.values[key] for key in columns})
+                    new_row.values[k] = func(new_row.values[k])
+            result[id] = Row(id_=id, **{key: new_row.values[key] for key in columns})
 
-        return result
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _transform_transform_rows(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _transform_transform_rows(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row]:
         """Fused transform + transform_rows: apply both transforms in one pass."""
+        from .rowview import RowView
         transform_funcs, transform_key = self.key
 
         transforms = transform_key
         if len(transforms) == 2 and not isinstance(transforms[0], tuple):
             transforms = [transforms]
 
+        is_view = isinstance(rows, RowView)
         result: dict[int, Row] = {}
         for id, row in rows.items():
             row = apply_all(transform_funcs, row)
+            if is_view and row is rows.get(id):
+                    row = row.copy()
             for keys, func in transforms:
                 if isinstance(keys, str):
                     keys = [keys]
@@ -749,11 +794,12 @@ class Operation:
                     row.values[k] = func(row.values[k])
             result[id] = row
 
-        return result
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _where_transform_select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where_transform_select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:
         """Fused where + transform + select: filter, transform, project in one pass."""
         from .row import Row
+        from .rowview import RowView
 
         where_key, transform_funcs, columns = self.key
 
@@ -767,22 +813,26 @@ class Operation:
             if column in columns
         }
 
+        is_view = isinstance(rows, RowView)
+
         if callable(where_key):
-            return {
+            result = {
                 id: Row(id_=id, **{key: row.values[key] for key in columns})
                 for id, row in rows.items()
                 if where_key(row)
                 for row in [apply_all(transform_funcs, row)]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = where_key
         if callable(key):
-            return {
+            result = {
                 id: Row(id_=id, **{key: row.values[key] for key in columns})
                 for id, row in rows.items()
                 if key(row.values[column])
                 for row in [apply_all(transform_funcs, row)]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -790,22 +840,25 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            return {
+            result = {
                 id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) # pyright: ignore[reportPrivateUsage]
                 for id in matching
                 for _ in [apply_all(transform_funcs, table._rows[id])] # pyright: ignore[reportPrivateUsage]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
+        result = {
             id: Row(id_=id, **{key: rows[id].values[key] for key in columns})
             for id in matching
             if id in rows
             for _ in [apply_all(transform_funcs, rows[id])]
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
-    def _where_transform_rows_select(self, table: Table, rows: dict[int, Row]) -> dict[int, Row]:
+    def _where_transform_rows_select(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row]:
         """Fused where + transform_rows + select: filter, transform, project in one pass."""
         from .row import Row
+        from .rowview import RowView
 
         where_key, transform_key, columns = self.key
 
@@ -823,30 +876,35 @@ class Operation:
         if len(transforms) == 2 and not isinstance(transforms[0], tuple):
             transforms = [transforms]
 
+        is_view = isinstance(rows, RowView)
+
         def apply_transforms(row: Row) -> Row:
+            new_row = row.copy() if is_view else row
             for keys, func in transforms:
                 if isinstance(keys, str):
                     keys = [keys]
                 for k in keys:
-                    row.values[k] = func(row.values[k])
-            return row
+                    new_row.values[k] = func(new_row.values[k])
+            return new_row
 
         if callable(where_key):
-            return {
+            result = {
                 id: Row(id_=id, **{key: row.values[key] for key in columns})
                 for id, row in rows.items()
                 if where_key(row)
                 for row in [apply_transforms(row)]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
         column, key = where_key
         if callable(key):
-            return {
+            result = {
                 id: Row(id_=id, **{key: row.values[key] for key in columns})
                 for id, row in rows.items()
                 if key(row.values[column])
                 for row in [apply_transforms(row)]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
         if isinstance(key, Iterable) and not isinstance(key, (str, bytes, dict)):
             matching = table.lookup_many(column, cast(Iterable[Any], key))
@@ -854,18 +912,20 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            return {
+            result = {
                 id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) # pyright: ignore[reportPrivateUsage]
                 for id in matching
                 for _row in [apply_transforms(table._rows[id])] # pyright: ignore[reportPrivateUsage]
             }
+            return _wrap_filter_view(rows, result) if is_view else result
 
-        return {
+        result = {
             id: Row(id_=id, **{key: rows[id].values[key] for key in columns})
             for id in matching
             if id in rows
             for _row in [apply_transforms(rows[id])]
         }
+        return _wrap_filter_view(rows, result) if is_view else result
 
     map: dict[OpType, Callable[[Self, Table, dict[int, Row]], dict[int, Row] | RowView]] = {
         OpType.WHERE: _where,

@@ -352,17 +352,9 @@ class Table:
     def clone(self) -> Table:
         if not self._in_transaction:
             self._apply_ops()
-        t = object.__new__(Table)
-        t.database = None
-        t.name = self.name
-        t._rows = self._rows if self._in_transaction else self._rows.copy()
-        t._columns = self._columns
-        t.indexes = self.indexes
-        t._transaction = None
-        t.operations = self.operations.copy() if self._in_transaction else []
-        t._default_columns = self._default_columns
-        t._in_transaction = self._in_transaction
-        return t
+        # Return a TableView instead of copying rows
+        from .tableview import TableView
+        return TableView(self)
 
     def rclone(self, table: Table):
         self._rows = table._rows.copy()

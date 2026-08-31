@@ -22,7 +22,11 @@ class RowView(dict[int, 'Row']):
         self._deleted: set[int] = deleted if deleted is not None else set()
 
         # Track length incrementally to avoid O(n) computation
-        self._len = len(base) + len(self._delta) - len(self._deleted)
+        # Visible rows = base rows not deleted and not in delta + all delta rows
+        base_keys = set(base.keys())
+        delta_keys = set(self._delta.keys())
+        visible_base = len(base_keys - self._deleted - delta_keys)
+        self._len = visible_base + len(delta_keys)
 
     def __getitem__(self, key: int) -> Row:
         if key in self._deleted:
@@ -43,13 +47,19 @@ class RowView(dict[int, 'Row']):
 
     def __setitem__(self, key: int, value: Row) -> None:
         in_base = key in self._base
+        in_delta = key in self._delta
         in_deleted = key in self._deleted
 
         self._delta[key] = value
         self._deleted.discard(key)
 
-        # Length changes only when adding a new key or restoring a deleted one
-        if in_deleted or not in_base:
+        # Length changes:
+        # - Adding a new key (not in base, not in deleted): +1
+        # - Restoring a deleted key (in deleted, not in base): +1
+        # - Overwriting existing delta or base row: no change
+        if not in_base and not in_deleted:
+            self._len += 1
+        elif in_deleted and not in_base:
             self._len += 1
 
     def __delitem__(self, key: int) -> None:
@@ -60,8 +70,11 @@ class RowView(dict[int, 'Row']):
             del self._delta[key]
         self._deleted.add(key)
 
-        # Length changes when removing a visible key
-        if in_delta or in_base:
+        # Length changes:
+        # - Removing a visible delta row: -1
+        # - Removing a visible base row (not in delta): -1
+        # - Removing an already deleted row: no change
+        if in_delta or (in_base and not in_delta):
             self._len -= 1
 
     def __contains__(self, key: object) -> bool:
@@ -72,15 +85,12 @@ class RowView(dict[int, 'Row']):
     def __len__(self) -> int:
         return self._len
 
-    def __iter__(self):
-        seen: set[int] = set()
+    def __iter__(self) -> Generator[int, Any, None]:
+        # Yield base keys first (not in delta), then delta keys
         for key in self._base:
             if key not in self._deleted and key not in self._delta:
-                seen.add(key)
                 yield key
-        for key in self._delta:
-            if key not in seen:
-                yield key
+        yield from self._delta
 
     def get[T](self, key: int, default: T = None) -> Row | T:
         if key in self._deleted:
