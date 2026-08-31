@@ -538,9 +538,6 @@ class Operation:
 
             view[row.id] = row
 
-            for index in table.indexes.values():
-                index.add(row)
-
         return view
 
     def _update(self, table: Table, rows: dict[int, Row]) -> RowView:
@@ -551,7 +548,6 @@ class Operation:
             return rows if type(rows) is RowView else RowView(rows)
 
         view = rows if type(rows) is RowView else RowView(rows)
-        indexed_columns = set(table.indexes.keys())
 
         for source_id, source in source_rows.items():
             current = view.get(source_id)
@@ -563,22 +559,7 @@ class Operation:
 
             current = current.copy(table)
             view[source_id] = current
-
-            # Only track old values for indexed columns that are being updated
-            updated_indexed = indexed_columns & source.values.keys()
-            old_values = {col: current.values[col] for col in updated_indexed}
-
             current.values.update(source.values)
-
-            # Only update indexes for columns that actually changed
-            for column, old_value in old_values.items():
-                new_value = current.values[column]
-                if old_value != new_value:
-                    table.indexes[column].update(
-                        old_value,
-                        new_value,
-                        current.id,
-                    )
 
         return view
 

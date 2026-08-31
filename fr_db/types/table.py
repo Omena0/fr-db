@@ -119,6 +119,10 @@ class Table:
         for op in optimized:
             op.apply(self)
 
+        # Mark indexes dirty - they will be rebuilt lazily on first access
+        for index in self.indexes.values():
+            index.mark_dirty()
+
     def _apply_ops_to_rows(self, rows: dict[int, Row]) -> dict[int, Row]:
         for op in self.operations:
             if func := Operation.map.get(op.type):

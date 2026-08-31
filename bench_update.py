@@ -30,10 +30,14 @@ def bench_sequential_updates_simple(n_rows: int, n_updates: int, n_iters: int = 
             for u in range(n_updates):
                 s = u * chunk_size
                 e = s + chunk_size
-                # Create a simple source table with modified rows
-                source_rows = {}
-                for row in tx.where(lambda r, s=s, e=e: s <= r["id"] < e).rows.values():
-                    source_rows[row.id] = Row(None, id_=row.id, username=f"updated_{row['username']}")
+                source_rows = {
+                    row.id: Row(
+                        None, id_=row.id, username=f"updated_{row['username']}"
+                    )
+                    for row in tx.where(
+                        lambda r, s=s, e=e: s <= r["id"] < e
+                    ).rows.values()
+                }
                 source_table = Table(None, f"source_{u}", rows=source_rows, _data_is_valid=True)
                 tx.update(source_table)
             # Force evaluation
