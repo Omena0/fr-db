@@ -22,6 +22,12 @@ but usually a comment is enough.
 
 End of the file should have at least 2 empty lines.
 
+### Comments
+
+No empty lines after comments.
+
+In most cases there should be a empty line before a comment.
+
 ### Indentation
 
 Standard indentation, 4 spaces.
@@ -95,16 +101,15 @@ method, function or class should have a docstring.
 Docstring format example template:
 
 ```py
-        """_summary_
-
-        :param column: _description_
-        :type column: str | Callable[[Row], bool]
-        :param key: _description_, defaults to _MISSING
-        :type key: Any, optional
-        :raises Exception: _description_
-        :return: _description_
-        :rtype: Table
-        """
+"""_summary_
+    :param column: _description_
+    :type column: str | Callable[[Row], bool]
+    :param key: _description_, defaults to _MISSING
+    :type key: Any, optional
+    :raises Exception: _description_
+    :return: _description_
+    :rtype: Table
+"""
 ```
 
 Use proper formatting so editor hover looks pretty.

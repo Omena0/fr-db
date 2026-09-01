@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Generator, Any
+from __future__ import annotations
+from typing import TYPE_CHECKING, Generator, Any, cast
 
 if TYPE_CHECKING:
     from .row import Row
@@ -18,7 +19,8 @@ class RowView(dict[int, 'Row']):
 
     def __init__(self, base: dict[int, Row], delta: dict[int, Row] | dict[int, dict[str, Any]] | None = None, deleted: set[int] | None = None):
         self._base = base
-        self._delta = delta if delta is not None else {}
+        # cast is a no-op at runtime, just for type checker
+        self._delta: dict[int, Row | dict[str, Any]] = cast(dict[int, Any], delta) if delta is not None else {}
         self._deleted: set[int] = deleted if deleted is not None else set()
 
         # Track length incrementally to avoid O(n) computation
@@ -45,9 +47,8 @@ class RowView(dict[int, 'Row']):
             return delta_val
         return self._base[key]
 
-    def __setitem__(self, key: int, value: Row) -> None:
+    def __setitem__(self, key: int, value: Row | dict[str, Any]) -> None:
         in_base = key in self._base
-        in_delta = key in self._delta
         in_deleted = key in self._deleted
 
         self._delta[key] = value
@@ -57,9 +58,7 @@ class RowView(dict[int, 'Row']):
         # - Adding a new key (not in base, not in deleted): +1
         # - Restoring a deleted key (in deleted, not in base): +1
         # - Overwriting existing delta or base row: no change
-        if not in_base and not in_deleted:
-            self._len += 1
-        elif in_deleted and not in_base:
+        if not in_base and not in_deleted or in_deleted and not in_base:
             self._len += 1
 
     def __delitem__(self, key: int) -> None:
@@ -74,7 +73,7 @@ class RowView(dict[int, 'Row']):
         # - Removing a visible delta row: -1
         # - Removing a visible base row (not in delta): -1
         # - Removing an already deleted row: no change
-        if in_delta or (in_base and not in_delta):
+        if in_delta or in_base:
             self._len -= 1
 
     def __contains__(self, key: object) -> bool:
@@ -96,7 +95,18 @@ class RowView(dict[int, 'Row']):
         if key in self._deleted:
             return default
 
-        return self._delta[key] if key in self._delta else self._base.get(key, default)
+        if key in self._delta:
+            delta_val = self._delta[key]
+            if isinstance(delta_val, dict):
+                # Raw values dict - merge with base row
+                base_row = self._base[key]
+                merged = base_row.values.copy()
+                merged.update(delta_val)
+                row = base_row.copy()
+                row.values = merged
+                return row
+            return delta_val
+        return self._base.get(key, default)
 
     def items(self) -> Generator[tuple[int, Row], Any, None]: # pyright: ignore[reportIncompatibleMethodOverride]
         for key in self:
@@ -114,7 +124,7 @@ class RowView(dict[int, 'Row']):
     def copy(self) -> dict[int, Row]:
         return dict(self.items())
 
-    def pop(self, key: int, *args: Any) -> Row:
+    def pop(self, key: int, *args: Any) -> Row | dict[str, Any]: # pyright: ignore[reportIncompatibleMethodOverride]
         if key in self._delta:
             value = self._delta.pop(key)
             self._deleted.discard(key)

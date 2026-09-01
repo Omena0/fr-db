@@ -4,6 +4,7 @@ from .types import *
 __all__ = [
     'Database',
     'Table',
+    'TableView',
     'Row',
     'Column',
     'Index',

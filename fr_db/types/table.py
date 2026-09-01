@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .column import Column
     from .index import Index
     from .row import Row
+    from .tableview import TableView
 
 _MISSING = object()
 
@@ -34,7 +35,7 @@ def _to_dict[K,T](
     return {key(item): item for item in value}
 
 class Table:
-    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns', '_in_transaction']
+    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns', '_in_transaction', '_query_cache']
     def __init__(
             self,
             database: Database | None,
@@ -54,6 +55,7 @@ class Table:
 
         self._transaction = None
         self._in_transaction = False
+        self._query_cache: dict[tuple[Any, ...], TableView] = {}
 
         self.operations: list[Operation] = list(operations)
 
@@ -87,19 +89,14 @@ class Table:
             idx.build(self)
 
     def _validate_data(self):
+        columns = self._columns
         for row in self._rows.values():
-            value_types = {
-                name: col.type
-                for name, col in row.columns.items()
-            }
-
             for name, value in row.values.items():
-                expected = value_types[name]
-
-                if expected is not type(value):
+                expected = columns.get(name)
+                if expected is not None and expected.type is not type(value):
                     raise TypeMismatchError(
                         f"Type mismatch in row: {type(value).__name__} "
-                        f"!= {expected.__name__}, {name}={value}"
+                        f"!= {expected.type.__name__}, {name}={value}"
                     )
 
     def __str__(self) -> str:
@@ -119,9 +116,11 @@ class Table:
         for op in optimized:
             op.apply(self)
 
+        self._query_cache.clear()
+
         # Mark indexes dirty - they will be rebuilt lazily on first access
         for index in self.indexes.values():
-            index.mark_dirty()
+            index._mark_dirty() # pyright: ignore[reportPrivateUsage]
 
     def _apply_ops_to_rows(self, rows: dict[int, Row]) -> dict[int, Row]:
         for op in self.operations:
@@ -144,7 +143,7 @@ class Table:
     @rows.setter
     def rows(self, value: dict[int, Row]):
         if self.database:
-            raise NoTransactionError('You must be in a transaction to mutate a table. Write to transacion.rows.')
+            raise NoTransactionError('You must be in a transaction to mutate a table. Write to transaction.rows.')
 
         self._rows = value
 
@@ -220,10 +219,14 @@ class Table:
 
     # Querying
     @overload
-    def where(self, column: Callable[[Row], bool]) -> Table: ...
+    def where(self, column: Callable[[Row], bool]) -> TableView: ...
     @overload
-    def where(self, column: str, key: Any) -> Table: ...
-    def where(self, column: str | Callable[[Row], bool], key: Any = _MISSING) -> Table:
+    def where(self, column: str, key: Any) -> TableView: ...
+    def where(self, column: str | Callable[[Row], bool], key: Any = _MISSING) -> TableView:
+        cache_key = (OpType.WHERE, column, key)
+        if cached := self._query_cache.get(cache_key):
+            return cached
+
         t = self.clone()
 
         if key is _MISSING:
@@ -234,24 +237,36 @@ class Table:
             op = Operation(OpType.WHERE, column, key)
 
         t.operations.append(op)
+        self._query_cache[cache_key] = t
         return t
 
-    def transform(self, *keys: Callable[[Row], Row]) -> Table:
+    def transform(self, *keys: Callable[[Row], Row]) -> TableView:
+        cache_key = (OpType.TRANSFORM, tuple(id(k.__code__) for k in keys))
+        if cached := self._query_cache.get(cache_key):
+            return cached
+
         t = self.clone()
         t.operations.append(Operation(OpType.TRANSFORM, *keys))
+        self._query_cache[cache_key] = t
         return t
 
-    def transform_rows(self, keys: str | list[str], func: Callable[[Any], Any]) -> Table:
+    def transform_rows(self, keys: str | list[str], func: Callable[[Any], Any]) -> TableView:
+        key = tuple(keys) if type(keys) is list else keys
+        cache_key = (OpType.TRANSFORM_ROWS, key, id(func.__code__))
+        if cached := self._query_cache.get(cache_key):
+            return cached
+
         t = self.clone()
         t.operations.append(Operation(OpType.TRANSFORM_ROWS, keys, func))
+        self._query_cache[cache_key] = t
         return t
 
-    def select(self, *columns: str) -> Table:
+    def select(self, *columns: str) -> TableView:
         t = self.clone()
         t.operations.append(Operation(OpType.SELECT, *columns))
         return t
 
-    def limit(self, count: int) -> Table:
+    def limit(self, count: int) -> TableView:
         t = self.clone()
         t.operations.append(Operation(OpType.LIMIT, count))
         return t
@@ -260,12 +275,12 @@ class Table:
         self,
         key: Callable[[Row], Any],
         reverse: bool = False,
-    ) -> Table:
+    ) -> TableView:
         t = self.clone()
         t.operations.append(Operation(OpType.SORT, key, reverse))
         return t
 
-    def distinct(self, *columns: str) -> Table:
+    def distinct(self, *columns: str) -> TableView:
         t = self.clone()
         t.operations.append(Operation(OpType.DISTINCT, *columns))
         return t
@@ -352,18 +367,22 @@ class Table:
         }
 
         self.operations = table.operations.copy()
+        self._query_cache = {}
 
-    def clone(self) -> Table:
+    def clone(self) -> TableView:
         if not self._in_transaction:
             self._apply_ops()
+
         # Return a TableView instead of copying rows
         from .tableview import TableView
+
         return TableView(self)
 
     def rclone(self, table: Table):
         self._rows = table._rows.copy()
         self._columns = table._columns.copy()
         self.operations = table.operations.copy()
+        self._query_cache = {}
         self.indexes = {
             name: index.clone()
             for name, index in table.indexes.items()

@@ -1,7 +1,7 @@
 import pytest
 from datetime import datetime
 
-from fr_db import Database, Table, Row, Column, Operation, OpType
+from fr_db import Database, Table, TableView, Row, Column, Operation, OpType
 
 
 def make_users() -> Table:
@@ -31,7 +31,7 @@ def make_users() -> Table:
     )
 
 
-def row_by_id(table: Table, value: int) -> Row:
+def row_by_id(table: Table | TableView, value: int) -> Row:
     return next(
         row for row in table.rows.values()
         if row["id"] == value

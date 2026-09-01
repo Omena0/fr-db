@@ -1,10 +1,13 @@
 from fr_db import Database, Table, Row, Column, Index
 from datetime import datetime
+from time import perf_counter
 import cProfile
 import pstats
 
 profiler = cProfile.Profile()
 profiler.enable()
+
+start = perf_counter()
 
 db = Database()
 
@@ -37,14 +40,16 @@ with users.transaction() as tx:
 # Increment 'Omena0's ID 10k times
 # Create source table once and reuse - merge logic only evaluates the first source
 with users.transaction() as tx:
-    source = tx.where('username', 'Omena0').transform_rows(['id'], lambda x: x+1)
     for _ in range(ITERS):
-        tx.update(source)
+        tx.update(
+            tx.where('username', 'Omena0')
+                .transform_rows(['id'], lambda x: x+1)
+        )
+
+took = perf_counter() - start
+print(f'Took {took:.4f} seconds')
 
 profiler.disable()
-
-stats = pstats.Stats(profiler)
-stats.sort_stats("cumtime").print_stats(30)
 
 # Make sure it took effect.
 id = users.lookup_one('username', 'Omena0')
@@ -54,3 +59,7 @@ row = users.rows[id]
 user_id = row['id']
 assert user_id == ITERS*2, f"Invalid user ID: {user_id}, should be {ITERS*2}."
 
+stats = pstats.Stats(profiler)
+stats.sort_stats("tottime").print_stats()
+#stats.sort_stats("cumtime").print_stats()
+#stats.sort_stats("ncalls") .print_stats()

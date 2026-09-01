@@ -19,7 +19,7 @@ def make_large_table(n_rows: int) -> Table:
 
 def bench_sequential_updates_simple(n_rows: int, n_updates: int, n_iters: int = 5) -> float:
     """Benchmark sequential UPDATEs with simple source tables (no pending ops)."""
-    times = []
+    times: list[float] = []
     for _ in range(n_iters):
         table = make_large_table(n_rows)
 
@@ -51,7 +51,7 @@ def bench_sequential_updates_simple(n_rows: int, n_updates: int, n_iters: int = 
 
 def bench_sequential_updates_with_ops(n_rows: int, n_updates: int, n_iters: int = 5) -> float:
     """Benchmark sequential UPDATEs with source tables that have pending ops."""
-    times = []
+    times: list[float] = []
     for _ in range(n_iters):
         table = make_large_table(n_rows)
 
@@ -78,7 +78,7 @@ def bench_sequential_updates_with_ops(n_rows: int, n_updates: int, n_iters: int 
 
 def bench_update_no_changes(n_rows: int, n_iters: int = 5) -> float:
     """Benchmark update where no values actually change."""
-    times = []
+    times: list[float] = []
     for _ in range(n_iters):
         table = make_large_table(n_rows)
 
@@ -100,7 +100,7 @@ def bench_update_no_changes(n_rows: int, n_iters: int = 5) -> float:
 
 def bench_single_update(n_rows: int, n_iters: int = 5) -> float:
     """Benchmark a single UPDATE operation."""
-    times = []
+    times: list[float] = []
     for _ in range(n_iters):
         table = make_large_table(n_rows)
 

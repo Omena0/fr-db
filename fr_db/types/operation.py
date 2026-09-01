@@ -47,20 +47,12 @@ def _wrap_filter_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
 
     This avoids copying rows for filtering operations (WHERE, LIMIT, DISTINCT).
     """
-    deleted = set(input_rows._base.keys()) - set(result.keys())
-    return RowView(input_rows._base, result, deleted)
-
-
-def _wrap_modify_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
-    """Wrap result in a RowView using same base with modified rows in delta.
-
-    This avoids copying unmodified rows for modification operations.
-    """
-    return RowView(input_rows._base, result)
+    deleted = set(input_rows._base.keys()) - set(result.keys()) # pyright: ignore[reportPrivateUsage]
+    return RowView(input_rows._base, result, deleted) # pyright: ignore[reportPrivateUsage]
 
 
 class Operation:
-    __slots__ = ['type', 'key']
+    __slots__ = ('type', 'key')
     def __init__(self, type: OpType, *key: Any):
         self.type = type
         self.key  = key
@@ -128,6 +120,12 @@ class Operation:
 
         while i < n:
             op = ops[i]
+
+            # Mutation ops (ADD, UPDATE, DELETE) can't be fused with anything
+            if op.type not in (OpType.WHERE, OpType.TRANSFORM, OpType.TRANSFORM_ROWS, OpType.SELECT, OpType.LIMIT, OpType.SORT, OpType.DISTINCT):
+                result.append(op)
+                i += 1
+                continue
 
             # Eliminate no-op limits (limit of 0 or negative = empty)
             if op.type == OpType.LIMIT and isinstance(op.key[0], int) and op.key[0] <= 0:
@@ -342,23 +340,19 @@ class Operation:
             base_table: Table | None = None
             source_rows: dict[int, Row] | None = None
             n_updates = len(group)
-            base_rows_snapshot: dict[int, Row] = {}
 
             for op in group:
                 source_table: Table = op.key[0]
                 if base_table is None:
                     base_table = source_table
-                    # Snapshot base rows BEFORE applying ops
-                    # Use _base._rows to avoid creating a RowView
-                    if isinstance(source_table, TableView):
-                        base_rows_snapshot = {rid: row.copy() for rid, row in source_table._base._rows.items()}  # pyright: ignore[reportPrivateUsage]
-                    else:
-                        base_rows_snapshot = {rid: row.copy() for rid, row in source_table._rows.items()}  # pyright: ignore[reportPrivateUsage]
                     # Evaluate once - all source tables have same ops
                     source_rows = source_table.rows
 
             assert source_rows is not None
             assert base_table is not None
+
+            # Get base rows reference (no copy yet)
+            base_rows_ref = base_table._base._rows if isinstance(base_table, TableView) else base_table._rows  # pyright: ignore[reportPrivateUsage]
 
             # For dependent UPDATEs, we need to compute the final value
             # after applying the transformation N times.
@@ -367,7 +361,7 @@ class Operation:
             combined_values: dict[int, dict[str, Any]] = {}
 
             for row_id, source_row in source_rows.items():
-                base_row = base_rows_snapshot.get(row_id)
+                base_row = base_rows_ref.get(row_id)
                 if base_row is None:
                     continue
 
@@ -386,8 +380,7 @@ class Operation:
 
             # Use RowView to overlay changes on base table's rows (no new Row objects)
             # Use _base._rows to avoid creating a RowView
-            base_rows = base_table._base._rows if isinstance(base_table, TableView) else base_table._rows  # pyright: ignore[reportPrivateUsage]
-            merged_rows = RowView(base_rows, combined_values)
+            merged_rows = RowView(base_rows_ref, combined_values)
             merged_table = TableView(base_table, merged_rows)
             return Operation(OpType.UPDATE, merged_table)
 
@@ -528,19 +521,25 @@ class Operation:
     def _add(self, table: Table, rows: dict[int, Row]) -> RowView:
         view = rows if isinstance(rows, RowView) else RowView(rows)
 
+        from .row import Row as RowClass
+
         for row in self.key:
-            row = row.copy(table)
-            row.table = table
+            # Use object.__new__ to avoid __init__ overhead and id conflict
+            new_row = object.__new__(RowClass)
+            new_row.values = row.values.copy()
+            new_row.table = table
+            new_row.id = row.id
+            new_row.columns = table._columns # pyright: ignore[reportPrivateUsage]
 
             for col in table._default_columns: # pyright: ignore[reportPrivateUsage]
-                if col.name not in row.values:
-                    row.values[col.name] = row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
+                if col.name not in new_row.values:
+                    new_row.values[col.name] = new_row._get_default_value(col) # pyright: ignore[reportPrivateUsage]
 
-            view[row.id] = row
+            view[new_row.id] = new_row
 
         return view
 
-    def _update(self, table: Table, rows: dict[int, Row]) -> RowView:
+    def _update(self, _t: Table,  rows: dict[int, Row]) -> RowView:
         source_table: Table = self.key[0]
         source_rows = source_table.rows
 
@@ -554,12 +553,10 @@ class Operation:
             if current is None:
                 continue
 
-            if all(current.values.get(k) == v for k, v in source.values.items()):
-                continue
-
-            current = current.copy(table)
-            view[source_id] = current
-            current.values.update(source.values)
+            if any(current.values.get(k) != v for k, v in source.values.items()):
+                # Store raw values dict in delta instead of copying the row
+                # The RowView will lazily merge these values when accessed
+                view[source_id] = source.values
 
         return view
 
@@ -571,8 +568,11 @@ class Operation:
             view = rows
             for id in to_delete:
                 row = view.pop(id)
+                if not isinstance(row, Row):
+                    row = self._materialize_row(table, row, id)
                 for index in table.indexes.values():
                     index.remove(row)
+
             return view
 
         new_rows = rows.copy()
@@ -582,6 +582,24 @@ class Operation:
                 index.remove(row)
 
         return new_rows
+
+    @staticmethod
+    def _materialize_row(table: Table, values: dict[str, Any], row_id: int) -> Row:
+        """Materialize a delta dict into a Row object."""
+        from .row import Row
+        base_row = table._rows.get(row_id)  # pyright: ignore[reportPrivateUsage]
+        if base_row is not None:
+            merged = base_row.values.copy()
+            merged.update(values)
+            row = base_row.copy(table)
+            row.values = merged
+            return row
+        row = object.__new__(Row)
+        row.values = values
+        row.table = table
+        row.columns = table._columns # pyright: ignore[reportPrivateUsage]
+        row.id = row_id
+        return row
 
     # Fused ops
     def _where_transform(self, table: Table, rows: dict[int, Row] | RowView) -> dict[int, Row] | RowView:

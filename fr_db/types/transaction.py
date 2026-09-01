@@ -1,7 +1,9 @@
 from ..errors import NotInATransactionError
 from .table import Table
-from typing import Self
+from typing import Self, TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .tableview import TableView
 
 class Transaction(Table):
     __slots__ = ['_table', '_active', 'aborted', '_catch_exc', '_in_transaction']
@@ -52,6 +54,7 @@ class Transaction(Table):
     def abort(self):
         self.aborted = True
 
-    def clone(self) -> Table:
+    def clone(self) -> TableView:
         from .tableview import TableView
         return TableView(self)
+
