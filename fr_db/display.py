@@ -1,11 +1,16 @@
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 from textwrap import wrap
+
 import re
 
 if TYPE_CHECKING:
     from .types import Table
 
+
 def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
+    """Render a table as a formatted text table with ANSI styling."""
     RESET = "\033[0m"
     BOLD = "\033[1m"
     UNDERLINE = "\033[4m"
@@ -253,4 +258,5 @@ def display_table(table: Table, width: int = 50, sort: bool = False) -> str:
     result += "\n" + border
 
     return result
+
 

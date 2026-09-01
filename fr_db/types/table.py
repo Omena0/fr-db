@@ -1,24 +1,25 @@
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any, cast, overload
-from collections.abc import Iterable, Callable
+from collections.abc import Callable, Iterable
 
 from .operation import Operation, OpType
 from ..display import display_table
-
 from ..errors import (
-    NoTransactionError,
     TableAlreadyExistsError,
+    InvalidOperationType,
     InATransactionError,
-    TypeMismatchError,
-    InvalidOperationType
+    NoTransactionError,
+    TypeMismatchError
 )
 
 if TYPE_CHECKING:
-    from .transaction import Transaction
     from .database import Database
+    from .tableview import TableView
     from .column import Column
     from .index import Index
     from .row import Row
-    from .tableview import TableView
+    from .transaction import Transaction
 
 _MISSING = object()
 
@@ -34,18 +35,32 @@ def _to_dict[K,T](
 
     return {key(item): item for item in value}
 
+
 class Table:
-    __slots__ = ['database', 'name', '_rows', '_columns', 'indexes', '_transaction', 'operations', '_default_columns', '_in_transaction', '_query_cache']
+    """A relational table with columns, rows, indexes, and operations."""
+    __slots__ = (
+        'database',
+        'name',
+        '_rows',
+        '_columns',
+        'indexes',
+        '_transaction',
+        'operations',
+        '_default_columns',
+        '_in_transaction',
+        '_query_cache'
+    )
+
     def __init__(
-            self,
-            database: Database | None,
-            name: str,
-            rows: dict[int, Row] | Iterable[Row] = (),
-            columns: dict[str, Column[Any]] | Iterable[Column[Any]] = (),
-            indexes: dict[str, Index] | Iterable[Index] = (),
-            operations: Iterable[Operation] = (),
-            _data_is_valid: bool = False
-        ):
+        self,
+        database: Database | None,
+        name: str,
+        rows: dict[int, Row] | Iterable[Row] = (),
+        columns: dict[str, Column[Any]] | Iterable[Column[Any]] = (),
+        indexes: dict[str, Index] | Iterable[Index] = (),
+        operations: Iterable[Operation] = (),
+        _data_is_valid: bool = False
+    ):
         self.database = database
         self.name = name
 
@@ -67,7 +82,15 @@ class Table:
             if 'autoinc' in col.properties or col.default is not None
         )
 
+    def __str__(self) -> str:
+        return display_table(self, width=100, sort=False)
+
+    def __repr__(self) -> str:
+        return f'Table({self.name}, ...)'
+
+    # Internal
     def _check_data(self):
+        """Validate and wire up rows, columns, and indexes."""
         for row in self._rows.values():
             if row.table != self:
                 row.table = self
@@ -89,6 +112,7 @@ class Table:
             idx.build(self)
 
     def _validate_data(self):
+        """Check that all row values match their column types."""
         columns = self._columns
         for row in self._rows.values():
             for name, value in row.values.items():
@@ -99,13 +123,8 @@ class Table:
                         f"!= {expected.type.__name__}, {name}={value}"
                     )
 
-    def __str__(self) -> str:
-        return display_table(self, width=100, sort=False)
-
-    def __repr__(self) -> str:
-        return f'Table({self.name}, ...)'
-
     def _apply_ops(self):
+        """Apply pending operations and mark indexes dirty."""
         if not self.operations:
             return
 
@@ -123,6 +142,10 @@ class Table:
             index._mark_dirty() # pyright: ignore[reportPrivateUsage]
 
     def _apply_ops_to_rows(self, rows: dict[int, Row]) -> dict[int, Row]:
+        """Apply pending operations to a given set of rows.\n
+            :param rows: The rows to transform
+            :type rows: dict[int, Row]
+        """
         for op in self.operations:
             if func := Operation.map.get(op.type):
                 rows = func(op, self, rows)
@@ -132,8 +155,10 @@ class Table:
 
         return rows
 
+    # Properties
     @property
     def rows(self) -> dict[int, Row]:
+        """Return the table's rows, applying pending operations first."""
         if self._transaction:
             raise InATransactionError(f'You cannot access {self.name}.rows while in a transaction. Use tx.rows.')
 
@@ -149,6 +174,7 @@ class Table:
 
     @property
     def columns(self) -> dict[str, Column[Any]]:
+        """Return the table's columns, applying pending operations first."""
         if self._transaction:
             raise InATransactionError(f'You cannot access {self.name}.columns while in a transaction. Use tx.columns.')
 
@@ -167,19 +193,11 @@ class Table:
 
     # Auto-indexed lookups
     def get_index(self, column: str) -> Index | None:
-        """Return the index associated with a column, or None if no index exists.
-
-        Used by lookup helpers to determine whether an indexed lookup is
-        available for the requested column.
-        """
+        """Return the index associated with a column, or None if no index exists."""
         return self.indexes.get(column, None)
 
     def lookup(self, column: str, value: Any) -> set[int]:
-        """Return all row IDs whose column has the given value.
-
-        This is the general-purpose equality lookup operation and should be used
-        by other table operations instead of implementing index checks themselves.
-        """
+        """Return all row IDs whose column has the given value."""
         if idx := self.get_index(column):
             return idx.values[value]
 
@@ -189,11 +207,7 @@ class Table:
         }
 
     def lookup_one(self, column: str, value: Any) -> int | None:
-        """Return first row whose column has the given value, or None.
-
-        This is primarily useful for unique columns/indexes where at most one row
-        is expected to match.
-        """
+        """Return first row whose column has the given value, or None."""
         if idx := self.get_index(column):
             return next(iter(idx.values[value]), None)
 
@@ -223,6 +237,7 @@ class Table:
     @overload
     def where(self, column: str, key: Any) -> TableView: ...
     def where(self, column: str | Callable[[Row], bool], key: Any = _MISSING) -> TableView:
+        """Return a filtered view where the predicate or column condition is true."""
         cache_key = (OpType.WHERE, column, key)
         if cached := self._query_cache.get(cache_key):
             return cached
@@ -241,6 +256,7 @@ class Table:
         return t
 
     def transform(self, *keys: Callable[[Row], Row]) -> TableView:
+        """Return a view with row-transforming operations applied."""
         cache_key = (OpType.TRANSFORM, tuple(id(k.__code__) for k in keys))
         if cached := self._query_cache.get(cache_key):
             return cached
@@ -251,6 +267,7 @@ class Table:
         return t
 
     def transform_rows(self, keys: str | list[str], func: Callable[[Any], Any]) -> TableView:
+        """Return a view that transforms specific column values."""
         key = tuple(keys) if type(keys) is list else keys
         cache_key = (OpType.TRANSFORM_ROWS, key, id(func.__code__))
         if cached := self._query_cache.get(cache_key):
@@ -262,11 +279,13 @@ class Table:
         return t
 
     def select(self, *columns: str) -> TableView:
+        """Return a view projecting only the specified columns."""
         t = self.clone()
         t.operations.append(Operation(OpType.SELECT, *columns))
         return t
 
     def limit(self, count: int) -> TableView:
+        """Return a view limited to the first ``count`` rows."""
         t = self.clone()
         t.operations.append(Operation(OpType.LIMIT, count))
         return t
@@ -276,17 +295,20 @@ class Table:
         key: Callable[[Row], Any],
         reverse: bool = False,
     ) -> TableView:
+        """Return a view with rows sorted by the given key function."""
         t = self.clone()
         t.operations.append(Operation(OpType.SORT, key, reverse))
         return t
 
     def distinct(self, *columns: str) -> TableView:
+        """Return a view with duplicate rows removed."""
         t = self.clone()
         t.operations.append(Operation(OpType.DISTINCT, *columns))
         return t
 
     # Mutation
     def transaction(self, catch_exc: bool = False) -> Transaction:
+        """Begin a transaction on this table."""
         from .transaction import Transaction
         if not self._transaction:
             self._transaction = Transaction(self, catch_exc)
@@ -294,6 +316,7 @@ class Table:
         return self._transaction
 
     def add(self, row: Row) -> Table:
+        """Add a row to this table (must be in a transaction)."""
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
@@ -303,6 +326,7 @@ class Table:
         return self
 
     def update(self, table: Table) -> Table:
+        """Update this table from another table (must be in a transaction)."""
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
@@ -312,6 +336,7 @@ class Table:
         return self
 
     def delete(self, key: Callable[[Row], bool]) -> Table:
+        """Delete rows matching the predicate (must be in a transaction)."""
         if self.database:
             raise NoTransactionError(
                 'You must be in a transaction to mutate a table.'
@@ -351,6 +376,7 @@ class Table:
         return table
 
     def rcopy(self, table: Table):
+        """Replace this table's data with a deep copy of another table's."""
         self._rows = {
             id: row.copy(self)
             for id, row in table._rows.items()
@@ -370,6 +396,7 @@ class Table:
         self._query_cache = {}
 
     def clone(self) -> TableView:
+        """Return a TableView that lazily applies pending operations."""
         if not self._in_transaction:
             self._apply_ops()
 
@@ -379,6 +406,7 @@ class Table:
         return TableView(self)
 
     def rclone(self, table: Table):
+        """Replace this table's data with a shallow copy of another table's."""
         self._rows = table._rows.copy()
         self._columns = table._columns.copy()
         self.operations = table.operations.copy()
@@ -391,4 +419,3 @@ class Table:
             col for col in self._columns.values()
             if 'autoinc' in col.properties or col.default is not None
         )
-

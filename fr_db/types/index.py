@@ -12,7 +12,7 @@ class Index:
         Index for fast lookups on a column.
         Supports unique constraints and lazy rebuilding.
     """
-    __slots__ = ['_dirty', '_shared', '_table', '_values', 'column', 'unique']
+    __slots__ = ('column', 'unique', '_values', '_shared', '_dirty', '_table')
 
     def __init__(self, column: str, unique: bool = False):
         """Initialize an index on the given column.
@@ -29,16 +29,12 @@ class Index:
         self._table: Table | None = None
 
     def __repr__(self) -> str:
-        """Return a string representation of the index.
-            :return: String representation
-            :rtype: str
-        """
         self._ensure_built()
         return f'Index({self.column}, {self._values})'
 
     # Internal
-    def _ensure_built(self) -> None:
-        """Lazy rebuild index if dirty.
+    def _ensure_built(self):
+        """Lazy rebuild index if dirty.\n
             :raises ValueError: If a duplicate value is found in a unique index
         """
         if not self._dirty:
@@ -53,7 +49,7 @@ class Index:
         if table is None:
             return
 
-        for row_id, row in table._rows.items():  # pyright: ignore[reportPrivateUsage]
+        for row_id, row in table._rows.items(): # pyright: ignore[reportPrivateUsage]
             value = row.values[self.column]
             ids = self._values.get(value)
 
@@ -69,14 +65,14 @@ class Index:
             else:
                 ids.add(row_id)
 
-    def _mark_dirty(self) -> None:
+    def _mark_dirty(self):
         """Mark index as needing rebuild."""
         self._dirty = True
 
     # Properties
     @property
     def values(self) -> dict[Any, set[int]]:
-        """Access index values, rebuilding if dirty.
+        """Access index values, rebuilding if dirty.\n
             :return: Index value to row IDs mapping
             :rtype: dict[Any, set[int]]
         """
@@ -84,8 +80,8 @@ class Index:
         return self._values
 
     # Index operations
-    def add(self, row: Row) -> None:
-        """Add a row to the index.
+    def add(self, row: Row):
+        """Add a row to the index.\n
             :param row: The row to add
             :type row: Row
             :raises ValueError: If a duplicate value is found in a unique index
@@ -112,8 +108,8 @@ class Index:
         else:
             ids.add(row.id)
 
-    def remove(self, row: Row) -> None:
-        """Remove a row from the index.
+    def remove(self, row: Row):
+        """Remove a row from the index.\n
             :param row: The row to remove
             :type row: Row
         """
@@ -126,6 +122,7 @@ class Index:
             return
 
         if self._shared:
+            # Copy-on-write
             ids = ids.copy()
             ids.remove(row.id)
 
@@ -140,13 +137,8 @@ class Index:
             if not ids:
                 del self._values[value]
 
-    def update(
-        self,
-        old_value: Any,
-        new_value: Any,
-        row_id: int,
-    ) -> None:
-        """Update a value in the index.
+    def update(self, old_value: Any, new_value: Any, row_id: int):
+        """Update a value in the index.\n
             :param old_value: The previous value
             :type old_value: Any
             :param new_value: The new value
@@ -172,6 +164,7 @@ class Index:
 
         if old_ids is not None:
             if self._shared:
+                # Copy-on-write
                 old_ids = old_ids.copy()
                 old_ids.discard(row_id)
 
@@ -201,8 +194,8 @@ class Index:
             new_ids.add(row_id)
 
     # Lifecycle
-    def build(self, table: Table) -> None:
-        """Build the index for a table.
+    def build(self, table: Table):
+        """Build the index for a table.\n
             :param table: The table to index
             :type table: Table
         """
@@ -211,7 +204,7 @@ class Index:
         self._ensure_built()
 
     def copy(self, table: Table) -> Index:
-        """Create a copy of this index for a new table.
+        """Create a copy of this index for a new table.\n
             :param table: The table for the copied index
             :type table: Table
             :return: A new index instance
@@ -226,7 +219,7 @@ class Index:
         return index
 
     def clone(self) -> Index:
-        """Clone index, preserving dirty state.
+        """Clone index, preserving dirty state.\n
             :return: A new index sharing the same underlying data
             :rtype: Index
         """
@@ -235,6 +228,7 @@ class Index:
         index._shared = True
         index._dirty = self._dirty
         index._table = self._table
+
         return index
 
 

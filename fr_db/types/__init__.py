@@ -1,12 +1,15 @@
+from __future__ import annotations
+
+from .transaction import Transaction
+from .tableview import TableView
+from .operation import Operation, OpType
+from .rowview import RowView
 from .database import Database
-from .table import Table
-from .row import Row
 from .column import Column
 from .index import Index
-from .operation import Operation, OpType
-from .transaction import Transaction
-from .rowview import RowView
-from .tableview import TableView
+from .table import Table
+from .row import Row
+
 
 __all__ = [
     'Database',
@@ -18,5 +21,7 @@ __all__ = [
     'OpType',
     'Transaction',
     'RowView',
-    'TableView'
+    'TableView',
 ]
+
+

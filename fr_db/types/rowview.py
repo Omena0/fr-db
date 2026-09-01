@@ -1,23 +1,30 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Generator, Any, cast
+
+from typing import TYPE_CHECKING, Generator, cast, Any
 
 if TYPE_CHECKING:
     from .row import Row
 
 
 class RowView(dict[int, 'Row']):
-    """Dict-like view overlaying a delta on top of a base dict.
+    """
+        Dict-like view overlaying a delta on top of a base dict.
 
-    Avoids copying the entire rows dict when only a few rows change.
-    Reads check _delta first, then fall back to _base.
+        Avoids copying the entire rows dict when only a few rows change.
+        Reads check _delta first, then fall back to _base.
 
-    The delta can be either:
-    - dict[int, Row]: Row objects (for modified rows)
-    - dict[int, dict[str, Any]]: Raw values (for merged updates, avoids creating Row objects)
+        The delta can be either:
+        - dict[int, Row]: Row objects (for modified rows)
+        - dict[int, dict[str, Any]]: Raw values (for merged updates, avoids creating Row objects)
     """
     __slots__ = ('_base', '_delta', '_deleted', '_len')
 
-    def __init__(self, base: dict[int, Row], delta: dict[int, Row] | dict[int, dict[str, Any]] | None = None, deleted: set[int] | None = None):
+    def __init__(
+        self,
+        base: dict[int, Row],
+        delta: dict[int, Row] | dict[int, dict[str, Any]] | None = None,
+        deleted: set[int] | None = None,
+    ):
         self._base = base
         # cast is a no-op at runtime, just for type checker
         self._delta: dict[int, Row | dict[str, Any]] = cast(dict[int, Any], delta) if delta is not None else {}
@@ -92,6 +99,12 @@ class RowView(dict[int, 'Row']):
         yield from self._delta
 
     def get[T](self, key: int, default: T = None) -> Row | T:
+        """Return the value for key, or default if not present.\n
+            :param key: The row ID to look up
+            :type key: int
+            :param default: The value to return if the key is not found
+            :type default: T
+        """
         if key in self._deleted:
             return default
 
@@ -109,22 +122,30 @@ class RowView(dict[int, 'Row']):
         return self._base.get(key, default)
 
     def items(self) -> Generator[tuple[int, Row], Any, None]: # pyright: ignore[reportIncompatibleMethodOverride]
+        """Return an iterator of (key, value) pairs."""
         for key in self:
             yield key, self[key]
 
     def values(self) -> Generator[Row, Any, None]: # pyright: ignore[reportIncompatibleMethodOverride]
+        """Return an iterator of values."""
         for key in self:
             yield self[key]
 
     def keys(self) -> set[int]: # pyright: ignore[reportIncompatibleMethodOverride]
+        """Return the set of visible keys."""
         result = set(self._base.keys()) - self._deleted
         result |= set(self._delta.keys())
         return result
 
     def copy(self) -> dict[int, Row]:
+        """Return a plain dict copy of the visible entries."""
         return dict(self.items())
 
     def pop(self, key: int, *args: Any) -> Row | dict[str, Any]: # pyright: ignore[reportIncompatibleMethodOverride]
+        """Remove and return the value for key.\n
+            :param key: The row ID to remove
+            :type key: int
+        """
         if key in self._delta:
             value = self._delta.pop(key)
             self._deleted.discard(key)
@@ -145,7 +166,7 @@ class RowView(dict[int, 'Row']):
         raise KeyError(key)
 
     def collapse(self) -> dict[int, Row]:
-        """Convert this view to an actual dict of Row objects.
+        """Convert this view to an actual dict of Row objects.\n
 
         This materializes all lazy operations and returns a concrete dict.
         Use this when you need an actual dict (e.g., for indexing, validation).
@@ -153,6 +174,7 @@ class RowView(dict[int, 'Row']):
         result: dict[int, Row] = {key: self[key] for key in self}
         return result
 
+
 __all__ = [
-    'Row'
+    'RowView'
 ]

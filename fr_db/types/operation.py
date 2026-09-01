@@ -1,13 +1,16 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Self, cast, Any
 from enum import IntEnum, auto
-from typing import Any, TYPE_CHECKING, Callable, Iterable, cast, Self
-from .rowview import RowView
+from collections.abc import Iterable, Callable
 
 from ..errors import InvalidOperationType
+from .rowview import RowView
 
 
 if TYPE_CHECKING:
-    from .table import Table
     from .row import Row
+    from .table import Table
 
 
 class OpType(IntEnum):
@@ -36,14 +39,15 @@ _MERGEABLE = frozenset({
     OpType.TRANSFORM, OpType.TRANSFORM_ROWS, OpType.UPDATE,
 })
 
-def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any):
+def apply_all(keys: Iterable[Callable[[Any], Any]], value: Any) -> Any:
+    """Apply a chain of functions to a value."""
     for key in keys:
         value = key(value)
     return value
 
 
 def _wrap_filter_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
-    """Wrap result in a RowView using same base with non-matching rows marked deleted.
+    """Wrap result in a RowView using same base with non-matching rows marked deleted.\n
 
     This avoids copying rows for filtering operations (WHERE, LIMIT, DISTINCT).
     """
@@ -52,10 +56,14 @@ def _wrap_filter_view(input_rows: RowView, result: dict[int, Row]) -> RowView:
 
 
 class Operation:
+    """
+        A single operation on a table (WHERE, TRANSFORM, SELECT, etc.).
+    """
     __slots__ = ('type', 'key')
+
     def __init__(self, type: OpType, *key: Any):
         self.type = type
-        self.key  = key
+        self.key = key
 
     def __repr__(self) -> str:
         return f'Operation({self.type.name}, *{self.key})'
@@ -303,7 +311,7 @@ class Operation:
         op_type = group[0].type
 
         if op_type == OpType.ADD:
-            rows:list[Row] = []
+            rows: list[Row] = []
             for op in group:
                 rows.extend(op.key)
 
@@ -352,7 +360,7 @@ class Operation:
             assert base_table is not None
 
             # Get base rows reference (no copy yet)
-            base_rows_ref = base_table._base._rows if isinstance(base_table, TableView) else base_table._rows  # pyright: ignore[reportPrivateUsage]
+            base_rows_ref = base_table._base._rows if isinstance(base_table, TableView) else base_table._rows   # pyright: ignore[reportPrivateUsage]
 
             # For dependent UPDATEs, we need to compute the final value
             # after applying the transformation N times.
@@ -409,8 +417,8 @@ class Operation:
         else:
             matching = table.lookup(column, key)
 
-        if rows is table._rows:  # pyright: ignore[reportPrivateUsage]
-            result = {id: table._rows[id] for id in matching}  # pyright: ignore[reportPrivateUsage]
+        if rows is table._rows:   # pyright: ignore[reportPrivateUsage]
+            result = {id: table._rows[id] for id in matching}   # pyright: ignore[reportPrivateUsage]
             return _wrap_filter_view(rows, result) if is_view else result
 
         result = {id: rows[id] for id in matching if id in rows}
@@ -448,8 +456,8 @@ class Operation:
 
         assert all(isinstance(i, str) for i in self.key)
 
-        table._columns = {  # pyright: ignore[reportPrivateUsage]
-            key: table._columns[key]  # pyright: ignore[reportPrivateUsage]
+        table._columns = {   # pyright: ignore[reportPrivateUsage]
+            key: table._columns[key]   # pyright: ignore[reportPrivateUsage]
             for key in self.key
         }
 
@@ -521,11 +529,11 @@ class Operation:
     def _add(self, table: Table, rows: dict[int, Row]) -> RowView:
         view = rows if isinstance(rows, RowView) else RowView(rows)
 
-        from .row import Row as RowClass
+        from .row import Row
 
         for row in self.key:
             # Use object.__new__ to avoid __init__ overhead and id conflict
-            new_row = object.__new__(RowClass)
+            new_row = object.__new__(Row)
             new_row.values = row.values.copy()
             new_row.table = table
             new_row.id = row.id
@@ -544,9 +552,9 @@ class Operation:
         source_rows = source_table.rows
 
         if not source_rows:
-            return rows if type(rows) is RowView else RowView(rows)
+            return rows if isinstance(rows, RowView) else RowView(rows)
 
-        view = rows if type(rows) is RowView else RowView(rows)
+        view = rows if isinstance(rows, RowView) else RowView(rows)
 
         for source_id, source in source_rows.items():
             current = view.get(source_id)
@@ -568,8 +576,10 @@ class Operation:
             view = rows
             for id in to_delete:
                 row = view.pop(id)
+
                 if not isinstance(row, Row):
                     row = self._materialize_row(table, row, id)
+
                 for index in table.indexes.values():
                     index.remove(row)
 
@@ -587,7 +597,7 @@ class Operation:
     def _materialize_row(table: Table, values: dict[str, Any], row_id: int) -> Row:
         """Materialize a delta dict into a Row object."""
         from .row import Row
-        base_row = table._rows.get(row_id)  # pyright: ignore[reportPrivateUsage]
+        base_row = table._rows.get(row_id)   # pyright: ignore[reportPrivateUsage]
         if base_row is not None:
             merged = base_row.values.copy()
             merged.update(values)
@@ -624,7 +634,7 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            result = {id: apply_all(transform_funcs, table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            result = {id: apply_all(transform_funcs, table._rows[id]) for id in matching}  # pyright: ignore[reportPrivateUsage]
             return _wrap_filter_view(rows, result) if is_view else result
 
         result = {id: apply_all(transform_funcs, rows[id]) for id in matching if id in rows}
@@ -637,7 +647,7 @@ class Operation:
 
         where_key, columns = self.key
 
-        table._columns = { # pyright: ignore[reportPrivateUsage]
+        table._columns = {  # pyright: ignore[reportPrivateUsage]
             key: table._columns[key] # pyright: ignore[reportPrivateUsage]
             for key in columns
         }
@@ -664,7 +674,7 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            result = {id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) for id in matching} # pyright: ignore[reportPrivateUsage]
+            result = {id: Row(id_=id, **{key: table._rows[id].values[key] for key in columns}) for id in matching}  # pyright: ignore[reportPrivateUsage]
             return _wrap_filter_view(rows, result) if is_view else result
 
         result = {id: Row(id_=id, **{key: rows[id].values[key] for key in columns}) for id in matching if id in rows}
@@ -677,7 +687,7 @@ class Operation:
 
         transform_funcs, columns = self.key
 
-        table._columns = { # pyright: ignore[reportPrivateUsage]
+        table._columns = {  # pyright: ignore[reportPrivateUsage]
             key: table._columns[key] # pyright: ignore[reportPrivateUsage]
             for key in columns
         }
@@ -731,7 +741,7 @@ class Operation:
             matching = table.lookup(column, key)
 
         if rows is table._rows: # pyright: ignore[reportPrivateUsage]
-            result = {id: apply_transforms(table._rows[id]) for id in matching} # pyright: ignore[reportPrivateUsage]
+            result = {id: apply_transforms(table._rows[id]) for id in matching}  # pyright: ignore[reportPrivateUsage]
             return _wrap_filter_view(rows, result) if is_view else result
 
         result = {id: apply_transforms(rows[id]) for id in matching if id in rows}
@@ -744,7 +754,7 @@ class Operation:
 
         transform_key, columns = self.key
 
-        table._columns = { # pyright: ignore[reportPrivateUsage]
+        table._columns = {  # pyright: ignore[reportPrivateUsage]
             key: table._columns[key] # pyright: ignore[reportPrivateUsage]
             for key in columns
         }
@@ -802,7 +812,7 @@ class Operation:
 
         where_key, transform_funcs, columns = self.key
 
-        table._columns = { # pyright: ignore[reportPrivateUsage]
+        table._columns = {  # pyright: ignore[reportPrivateUsage]
             key: table._columns[key] # pyright: ignore[reportPrivateUsage]
             for key in columns
         }
@@ -861,7 +871,7 @@ class Operation:
 
         where_key, transform_key, columns = self.key
 
-        table._columns = { # pyright: ignore[reportPrivateUsage]
+        table._columns = {  # pyright: ignore[reportPrivateUsage]
             key: table._columns[key] # pyright: ignore[reportPrivateUsage]
             for key in columns
         }
@@ -948,7 +958,7 @@ class Operation:
     }
 
     def apply(self, table: Table):
-        rows = table._rows  # pyright: ignore[reportPrivateUsage]
+        rows = table._rows   # pyright: ignore[reportPrivateUsage]
 
         func = Operation.map.get(self.type)
 
@@ -961,5 +971,5 @@ class Operation:
         if isinstance(new_rows, RowView):
             new_rows = new_rows.collapse()
 
-        table._rows = new_rows  # type: ignore
+        table._rows = new_rows   # type: ignore
 

@@ -1,18 +1,23 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Self
+
 from ..errors import NotInATransactionError
 from .table import Table
-from typing import Self, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .tableview import TableView
 
+
 class Transaction(Table):
-    __slots__ = ['_table', '_active', 'aborted', '_catch_exc', '_in_transaction']
+    """A transactional context for a table, supporting commit and rollback."""
+    __slots__ = ('_table', '_active', 'aborted', '_catch_exc', '_in_transaction')
 
     def __init__(self, table: Table, catch_exc: bool = False):
         super().__init__(None, "Transaction")
 
-        self._table    = table
-        self._active  = False
+        self._table = table
+        self._active = False
         self.aborted = False
         self._catch_exc = catch_exc
 
@@ -52,9 +57,10 @@ class Transaction(Table):
         return self._catch_exc
 
     def abort(self):
+        """Mark this transaction as aborted."""
         self.aborted = True
 
     def clone(self) -> TableView:
+        """Return a TableView sharing this transaction's data."""
         from .tableview import TableView
         return TableView(self)
-

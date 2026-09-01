@@ -1,13 +1,30 @@
-from ..errors import TypeMismatchError, MutuallyExclusiveError
-from typing import TYPE_CHECKING, Callable, Any
+from ..errors import MutuallyExclusiveError
+from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .table import Table
 
 _MISSING = object()
 
+
 class Column[T]():
-    __slots__ = ['name', 'type', 'default', 'properties', 'primary', 'unique', 'table', '_next_autoinc', 'default_is_factory']
+    """
+        A column definition for a table.
+
+        Defines the type, defaults, and properties (primary, unique, autoinc)
+        of a single column.
+    """
+    __slots__ = (
+        'name',
+        'type',
+        'default',
+        'properties',
+        'primary',
+        'unique',
+        'table',
+        '_next_autoinc',
+        'default_is_factory'
+    )
 
     def __init__(
         self,
@@ -16,14 +33,13 @@ class Column[T]():
         properties: list[str] = [],
         default: T | Callable[[], Any] = _MISSING,
         table: Table | None = None,
-    ) -> None:
-        if default is not _MISSING and not isinstance(default, val_type) and not callable(default):
-            raise TypeMismatchError(f'Default must be type of val_type: {default}')
-
+    ):
         self.name = name
         self.type = val_type
+
         self.default: T | Callable[[], Any] = default
         self.default_is_factory = callable(self.default)
+
         self.properties: list[str] = properties
         self.primary = 'primary' in properties
         self.unique  = 'unique'  in properties or self.primary
@@ -41,11 +57,17 @@ class Column[T]():
     def __repr__(self) -> str:
         return f'Column({self.name}, {self.type.__name__}, {self.default}, {self.properties})'
 
+    # Internal
     def autoinc(self):
+        """Generate the next auto-incremented value."""
         self._next_autoinc += 1
         return self._next_autoinc-1
 
     def copy(self, table: Table | None = None) -> Column[T]:
+        """Create a copy of this column, optionally bound to a table.\n
+            :param table: The table for the copied column
+            :type table: Table | None
+        """
         column = Column(
             self.name,
             self.type,
@@ -60,4 +82,3 @@ class Column[T]():
             table._columns[self.name] = column # pyright: ignore[reportPrivateUsage]
 
         return column
-

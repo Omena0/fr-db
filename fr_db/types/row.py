@@ -3,21 +3,23 @@ from typing import Any, Callable, Iterable
 from .column import Column
 from .table import Table
 
+
 class Row:
-    __slots__ = ['values', 'table', 'columns', 'id']
+    __slots__ = ('values', 'table', 'columns', 'id')
+
     def __init__(
-            self,
-            table: Table | None = None,
-            id_: int | None = None,
-            **values: Any
-        ):
+        self,
+        table: Table | None = None,
+        id_: int | None = None,
+        **values: Any,
+    ):
         self.values = values
         self.table = table
         self.columns: dict[str, Column[Any]] = {}
 
         self.id = id_ or id(self)
 
-        # If table isnt defined yet then the Table should define it and call _deferred init later.
+       # If table isnt defined yet then the Table should define it and call _deferred init later.
         if isinstance(self.table, Table):
             self._deferred_init()
 
@@ -28,6 +30,7 @@ class Row:
         return self.values[key]
 
     def _deferred_init(self):
+        """Register this row with its table's columns and rows."""
         assert isinstance(self.table, Table)
 
         self.columns = self.table._columns # pyright: ignore[reportPrivateUsage]
@@ -46,6 +49,14 @@ class Row:
         rows: Iterable[Row] | None = None,
         exclude: Iterable[Row] = (),
     ):
+        """Validate uniqueness and types for this row's values.\n
+            :param rows: Rows to check against (defaults to the table's rows)
+            :type rows: Iterable[Row] | None
+            :param exclude: Rows to skip during uniqueness checks
+            :type exclude: Iterable[Row]
+            :raises DuplicateValueError: If a unique column value already exists
+            :raises TypeMismatchError: If a value's type doesn't match its column
+        """
         assert self.columns
 
         exclude_ids = {row.id for row in exclude}
@@ -53,9 +64,9 @@ class Row:
 
         if rows is None:
             assert self.table
-            rows = self.table._rows.values()  # pyright: ignore[reportPrivateUsage]
+            rows = self.table._rows.values() # pyright: ignore[reportPrivateUsage]
 
-        # Check uniqueness
+       # Check uniqueness
         for name, col in self.columns.items():
             if not col.unique:
                 continue
@@ -71,9 +82,9 @@ class Row:
                 )
 
             elif any(
-                    row.id not in exclude_ids and row.values[name] == value
-                    for row in rows
-                ):
+                row.id not in exclude_ids and row.values[name] == value
+                for row in rows
+            ):
                 raise DuplicateValueError(
                     f"Duplicate value {value!r} for "
                     f"{'primary' if col.primary else 'unique'} column {name!r}"
@@ -94,6 +105,10 @@ class Row:
                 )
 
     def _get_default_value(self, col: Column[Any]):
+        """Resolve the default value for a column.\n
+            :param col: The column to read defaults from
+            :type col: Column[Any]
+        """
         assert isinstance(self.table, Table)
 
         if 'autoinc' in col.properties:
@@ -105,10 +120,24 @@ class Row:
         return None
 
     def set_value(self, key: str, value: Any):
+        """Set a column value on this row.\n
+            :param key: The column name
+            :type key: str
+            :param value: The value to set
+            :type value: Any
+        """
         self.values[key] = value
         return self
 
     def transform(self, keys: str | list[str], func: Callable[[Any], Any]) -> Row:
+        """Transform this row's values with a function.\n
+            :param keys: Column name(s) to transform
+            :type keys: str | list[str]
+            :param func: Function applied to each matched value
+            :type func: Callable[[Any], Any]
+            :return: A new transformed row
+            :rtype: Row
+        """
         r = Row(None, id_=self.id, **self.values)
 
         if type(keys) is str:
@@ -121,6 +150,12 @@ class Row:
         return r
 
     def copy(self, table: Table | None = None) -> Row:
+        """Create a copy of this row, optionally bound to a table.\n
+            :param table: The table for the copied row
+            :type table: Table | None
+            :return: A new row instance
+            :rtype: Row
+        """
         row = object.__new__(Row)
 
         row.table = table
@@ -132,8 +167,7 @@ class Row:
 
     @property
     def primary_key(self):
+        """The column name of this row's primary key."""
         assert self.columns
-        return [
-            name for name, col in self.columns.items()
-            if 'primary' in col.properties
-        ][0]
+        return [name for name, col in self.columns.items()
+                if 'primary' in col.properties][0]
